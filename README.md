@@ -1,68 +1,61 @@
 # Calendar Assistant
 
-A command-line assistant that answers questions about my real Google Calendar
-and my meeting notes, in plain English, using Claude.
+A command-line assistant that answers natural-language questions about a Google
+Calendar and a folder of markdown meeting notes, using the Claude API.
 
-I built this to learn how the pieces actually fit together, so a fair amount of
-it does by hand what a library would otherwise hide. The decisions section near
-the bottom covers what I chose and what each choice cost me.
+## Overview
 
-## What it is
+The assistant loads a calendar, expands its recurrence rules into dated
+occurrences, indexes a folder of notes, and exposes both to a language model as
+callable tools. The model selects a tool, receives plain text back, and composes
+the reply. All date arithmetic, filtering, and ranking is performed in Python;
+the model performs none of it.
 
-I wanted to be able to ask my calendar things the way I'd ask a person. Not
-"open the app and scroll to Thursday," but "when am I free for 90 minutes this
-week?" or "what did we decide about the vendor renewal?" This is that.
+Calendars are supported from three sources, all of which produce the same event
+dictionary:
 
-It connects to a real Google Calendar. You give it the secret iCal address from
-your calendar settings and it downloads the live `.ics` export every time it
-starts, so what it tells you is what's actually on your calendar right now.
-There's also an OAuth route through the Google Calendar API if you'd rather not
-use a URL, and a plain-file mode for a calendar you've exported by hand.
+| Source | Flag | Requirements |
+|---|---|---|
+| Google Calendar secret iCal URL | `--source url` | `GOOGLE_ICS_URL` |
+| Google Calendar API (OAuth) | `--source api` | `credentials.json`, two extra packages |
+| Local `.ics` file | `--source file` (default) | `CALENDAR_FILE` |
 
-The part that took the most work is that **a calendar file doesn't contain your
-meetings.** It contains the rules that generate them. A weekly standup is one
-entry that says "starts 25 May 2026, repeat weekly on Mon/Wed/Fri," and next
-Monday's instance exists nowhere in the file until something calculates it.
-Same with birthdays: the file says "7 August 1993, yearly," not "Ana's birthday
-is this Friday." So before anything can answer a question, every rule has to be
-expanded into actual dated occurrences across the window you care about. On my
-calendar that turns ~300 stored events into thousands of dated ones.
+A calendar file stores recurrence rules, not individual meetings. A weekly
+standup is one entry with `RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR`; the instance
+falling on any given Monday exists nowhere in the file until it is computed.
+Birthdays are stored as `DTSTART:19930807` with `FREQ=YEARLY`. Every rule is
+therefore expanded into dated occurrences across a ±365 day window before any
+query runs.
 
-Claude's job here is not to know my schedule. It gets five tools it can call —
-find events, find free time, upcoming birthdays, search notes, remember a fact
-— and it picks which one fits the question, reads the text that comes back, and
-writes the reply. All the date arithmetic happens in Python, because models are
-unreliable at date math and when they get it wrong they get it wrong
-confidently. The model never computes "next Tuesday"; it passes the phrase
-`"next week"` through and `parse_when` resolves it.
+Note retrieval is a vector search: notes are split into paragraph-sized chunks,
+each chunk is converted to a word-frequency vector, and chunks are ranked
+against the query by cosine similarity.
 
-The notes half is separate. It reads a folder of markdown files, splits them
-into paragraph-sized chunks, turns each chunk into a word-frequency vector, and
-ranks them against the question by cosine similarity. That's a real vector
-search, just with word counts standing in for embeddings for now (see
-Limitations).
+Without `ANTHROPIC_API_KEY` the application runs against an offline
+keyword-matching model that selects tools by regular expression and prints raw
+tool output. Every code path except answer phrasing is exercised.
 
 ## Demo
 
-<!-- Record a 10-20s terminal session and drop it in as docs/demo.gif -->
+<!-- Record a 10-20s terminal session and save it as docs/demo.gif -->
 
 ![Demo](docs/demo.gif)
 
-## How it works
+## Architecture
 
 ```
 Google Calendar (secret iCal URL)
         |
         v
-ics_parser      .ics text  ->  event dicts        one dict per RULE
+ics_parser      .ics text  ->  event dicts        one dict per rule
         |
         v
-recurrence      rules      ->  dated occurrences  expands RRULE, drops EXDATEs
+recurrence      rules      ->  dated occurrences  expands RRULE, removes EXDATEs
         |
         v
 queries         occurrences + question -> text    filtering, date math, intervals
         |
-        +------ agent      model picks a tool, reads the result, writes the answer
+        +------ agent      selects a tool, reads the result, composes the answer
         |                        ^
 data/notes/*.md                  |
         |                        |
@@ -70,35 +63,57 @@ data/notes/*.md                  |
 search          notes -> chunks -> vectors -> ranked matches
 ```
 
-Everything downstream of `ics_parser` works on the same plain dictionary, so
-the three calendar sources (iCal URL, Google API, local file) all converge to
-one shape and nothing else has to know which one was used.
+The dictionary returned by `ics_parser.new_event()` is the interface between
+the calendar sources and everything downstream. A new source converts to that
+shape; no other module changes.
 
-### The modules
+### Modules
 
-| File | What it does |
+| File | Responsibility |
 |---|---|
-| [`ics_parser.py`](assistant/ics_parser.py) | Turns `.ics` text into event dictionaries. Handles line folding, escaped characters, quoted parameters. |
+| [`ics_parser.py`](assistant/ics_parser.py) | Parses `.ics` text into event dictionaries. Handles line folding, escaped characters, quoted parameters. |
 | [`recurrence.py`](assistant/recurrence.py) | Expands `RRULE` into dated occurrences and removes `EXDATE` exclusions. |
-| [`queries.py`](assistant/queries.py) | Parses date phrases, filters by overlap, finds birthdays, computes free time. |
-| [`search.py`](assistant/search.py) | Chunks the notes, builds word-count vectors, ranks by cosine similarity. |
-| [`agent.py`](assistant/agent.py) | Tool definitions, the system prompt, and the loop that runs tool calls. |
-| [`memory.py`](assistant/memory.py) | Conversation history, and facts saved to disk so they survive a restart. |
-| [`google_calendar.py`](assistant/google_calendar.py) | Downloads the iCal URL, or reads the Calendar API and converts its JSON. |
-| [`llm.py`](assistant/llm.py) | Wraps the Claude API. Falls back to an offline keyword matcher with no API key. |
-| [`config.py`](config.py) | All settings, read from `.env`. Includes the clock, so dates are testable. |
+| [`queries.py`](assistant/queries.py) | Date-phrase parsing, overlap filtering, birthday computation, free-time search. |
+| [`search.py`](assistant/search.py) | Note chunking, word-frequency vectors, cosine similarity ranking. |
+| [`agent.py`](assistant/agent.py) | Tool schemas, system prompt, tool-dispatch loop (max 5 steps). |
+| [`memory.py`](assistant/memory.py) | Conversation history and facts persisted to disk. |
+| [`google_calendar.py`](assistant/google_calendar.py) | iCal URL downloader, Calendar API client, JSON-to-event conversion. |
+| [`llm.py`](assistant/llm.py) | Claude API wrapper with an offline fallback model. |
+| [`config.py`](config.py) | Settings resolved from the environment, including the injected clock. |
 
-### The five tools
+### Tools exposed to the model
 
-| Tool | Answers |
+| Tool | Parameters | Returns |
+|---|---|---|
+| `find_events` | `when`, optional `person` | Events in a date range, optionally filtered by attendee |
+| `find_free_time` | `when`, `duration_minutes` | Gaps in working hours long enough for the requested duration |
+| `upcoming_birthdays` | `within_days` | Birthdays in the window, sorted by proximity |
+| `search_notes` | `query` | Highest-ranked note chunks with their source filenames |
+| `remember_fact` | `fact` | Confirmation; the fact is appended to every later system prompt |
+
+Tool errors are returned to the model as text rather than raised. An
+unrecognised date phrase produces the list of supported phrases, which the model
+reads before retrying.
+
+### Supported date phrases
+
+`parse_when` accepts only the following. Anything else raises and returns the
+list to the model.
+
+| Phrase | Range |
 |---|---|
-| `find_events` | "what's on Thursday?", "anything with Priya next week?" |
-| `find_free_time` | "when could I fit 90 minutes this week?" |
-| `upcoming_birthdays` | "whose birthday is coming up?" |
-| `search_notes` | "what did we decide about the renewal?" |
-| `remember_fact` | "remember that I prefer mornings for meetings" |
+| `today`, `tomorrow`, `yesterday` | One day, midnight to midnight |
+| `this week`, `next week`, `last week` | Calendar week, Monday to Sunday |
+| `this month`, `next month`, `last month` | Calendar month |
+| `next N days` | Today through N days ahead |
+| `last N days` | N days back through end of today |
+| `YYYY-MM-DD` | That single day |
+| `monday` … `sunday` | The next such weekday, never today |
+| `next monday` … `next sunday` | The weekday in the following week |
 
-## Setup
+All ranges are half-open, `[start, end)`.
+
+## Installation
 
 ```bash
 python3 -m venv .venv
@@ -106,46 +121,70 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Copy the config template and fill it in:
+Developed against Python 3.12. The `--source api` route additionally requires
+`google-api-python-client` and `google-auth-oauthlib`.
+
+### Configuration
+
+Settings are read from the environment. `config.py` loads a git-ignored `.env`
+file; real environment variables take precedence over it.
 
 ```bash
 cp .env.example .env
 ```
 
-Two values matter:
+| Variable | Default | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | unset | Enables the real model. Without it, the offline fallback is used. |
+| `ANTHROPIC_MODEL` | `claude-sonnet-5` | Model identifier |
+| `GOOGLE_ICS_URL` | unset | Secret iCal address, required for `--source url` |
+| `CALENDAR_FILE` | `data/sample_calendar.ics` | Local calendar for `--source file` |
+| `CALENDAR_NOW` | pinned to 2026-08-03 09:00 | Set to `now` to use the system clock |
+| `NOTES_FOLDER` | `data/notes` | Directory of `.md` files to index |
+| `WORK_START_HOUR` | `9` | Lower bound for free-time search |
+| `WORK_END_HOUR` | `17` | Upper bound for free-time search |
+| `GOOGLE_CALENDAR_ID` | `primary` | Calendar read by `--source api` |
 
-- `ANTHROPIC_API_KEY` — from https://console.anthropic.com. Without it the app
-  still runs, but on an offline keyword matcher instead of a real model.
-- `GOOGLE_ICS_URL` — in Google Calendar: Settings → your calendar → Integrate
-  calendar → **Secret address in iCal format**.
+`CALENDAR_NOW` defaults to a fixed date because the bundled sample calendar is
+built around 3 August 2026. Set it to `now` when using a real calendar.
 
-Also set `CALENDAR_NOW=now`. Without it the clock is pinned to 3 August 2026,
-which is the date the bundled sample calendar is built around.
+The secret iCal address is obtained from Google Calendar under Settings → the
+calendar → Integrate calendar → **Secret address in iCal format**.
 
-**Treat the iCal URL like a password.** Anyone who has it can read the whole
-calendar forever, with no login, and it doesn't expire until you reset it. It
-lives in `.env`, which is git-ignored. Don't paste it anywhere else.
+> **The iCal URL is a credential.** It grants permanent read access to the
+> entire calendar without authentication and does not expire until reset. It
+> belongs in `.env`, which is git-ignored, along with `credentials.json` and
+> `token.json`.
 
-### macOS certificate error
+### macOS certificate configuration
 
-If the download fails with `CERTIFICATE_VERIFY_FAILED`, your Python has no root
-certificates installed. This happens with the python.org installer. Run this
-once:
+Python distributions from python.org install no root certificates, causing
+`CERTIFICATE_VERIFY_FAILED` on the calendar download. Install them once:
 
 ```bash
 "/Applications/Python 3.12/Install Certificates.command"
 ```
 
-## Running it
+## Usage
 
-Check the calendar downloads and parses. This costs nothing — no model is
-involved:
+```bash
+python -m assistant.main [command] [--source file|url|api]
+```
+
+| Command | Behaviour | Model required |
+|---|---|---|
+| *(none)* | Interactive chat | Yes |
+| `agenda "<phrase>"` | Prints events in a date range | No |
+| `birthdays` | Prints upcoming birthdays | No |
+| `cache` | Downloads `GOOGLE_ICS_URL` to `data/google_cache.ics` | No |
+
+Verify the calendar loads before starting a chat session:
 
 ```bash
 python -m assistant.main agenda "this week" --source url
 ```
 
-Then start the chat:
+Start the assistant:
 
 ```bash
 python -m assistant.main --source url
@@ -153,35 +192,28 @@ python -m assistant.main --source url
 
 ```
 you > what's on my calendar tomorrow?
-you > when am I free for 30 minutes this week?
+you > when am I free for 90 minutes on Thursday?
 you > what did we decide about the Northwind renewal?
 you > quit
 ```
 
-Each turn prints which tool the model chose and what arguments it passed, which
-is the fastest way to spot a tool description that's steering it wrong.
+Each turn prints the selected tool and its arguments before the answer.
 
-If re-downloading on every start gets slow, save a local copy and read that
-instead:
+To avoid re-downloading the calendar on every start, cache it and read the
+cached file:
 
 ```bash
 python -m assistant.main cache
 CALENDAR_FILE=data/google_cache.ics python -m assistant.main
 ```
 
-### Other ways to run it
+### Google Calendar API route
 
-```bash
-python -m assistant.main agenda "next week"    # print a date range, no model
-python -m assistant.main birthdays             # print upcoming birthdays
-python -m assistant.main --source api          # OAuth instead of the URL
-python -m assistant.main                       # bundled sample calendar
-```
-
-The OAuth route needs a Google Cloud project with the Calendar API enabled and
-a Desktop-app OAuth client downloaded to `credentials.json`. The first run opens
-a browser and writes `token.json`. While the consent screen is in Testing status
-Google expires the refresh token weekly.
+Requires a Google Cloud project with the Calendar API enabled and an OAuth
+client of type *Desktop app*, downloaded to `credentials.json` in the project
+root. The first run opens a browser and writes `token.json`, which is reused
+afterwards. While the consent screen remains in *Testing* status, Google expires
+refresh tokens after seven days.
 
 ### Tests
 
@@ -189,94 +221,84 @@ Google expires the refresh token weekly.
 pytest -q
 ```
 
-76 tests, no network needed. They cover parsing, recurrence expansion, every
-date phrase, overlap filtering, interval merging, the tool loop, conversation
-trimming, the similarity math, and the Google JSON conversion against recorded
-payloads.
+76 tests, no network access required. Coverage includes parsing, recurrence
+expansion, every supported date phrase, overlap filtering, interval merging, the
+tool loop and its step limit, conversation trimming, similarity computation, and
+Google JSON conversion against recorded payloads.
 
-## Decisions I made, and what they cost
+## Design decisions
 
-Most of these were a choice between something that would work sooner and
-something I'd understand better. I usually picked the second one, and each has
-a downside I decided to live with.
+**Recurrence is expanded locally, not by the Calendar API.**
+`fetch_api_events` requests master events with `singleEvents=False` and expands
+them in `recurrence.py`. Rationale: a single expansion path serves all three
+calendar sources. Trade-off: edge cases such as `RECURRENCE-ID` overrides become
+this project's responsibility, and one of them is unhandled.
 
-**Expanding recurrence myself instead of letting Google do it.** The Calendar
-API will return pre-expanded instances of a repeating event if you ask for
-them. I ask for the master events instead (`singleEvents=False`) and expand
-them in `recurrence.py`. I wanted the expansion to be something I'd written,
-and it means all three calendar sources go through one code path instead of
-Google getting a special case. The cost is that I own the edge cases, including
-the one below that I haven't handled.
+**The full calendar is fetched, not a date-bounded slice.**
+`timeMin` and `timeMax` apply to the master event rather than its instances, so
+a series beginning in 2019 or a birthday dated 1993 would be excluded before the
+current instance could be generated. Rationale: correctness of the window.
+Trade-off: more data transferred and slower startup on large calendars.
 
-**Fetching the whole calendar instead of just the window I need.** The API
-takes `timeMin`/`timeMax`, but those bounds apply to the *master* event, not
-its instances. A standup that began in 2019, or a birthday dated 1993, gets
-filtered out before this week's occurrence is ever generated. So everything is
-fetched and paginated, and the windowing happens after expansion. That's more
-data over the wire than strictly necessary and it makes startup slower on a
-large calendar.
+**The model performs no date arithmetic.**
+Date phrases are passed through verbatim and resolved by `parse_when`. Rationale:
+language models produce incorrect dates with high confidence, making the failure
+silent. Trade-off: only enumerated phrases are supported; anything else returns
+an error string.
 
-**The model never does date arithmetic.** Claude passes phrases like
-`"next week"` through untouched and `parse_when` resolves them in Python.
-Models get date math wrong, and they're confident when they do, so the failure
-is silent and easy to miss. The cost is that only the phrases I explicitly
-handle work — ask for "the week after next" and you get an error message rather
-than an answer.
+**Note vectors are word frequencies, not embeddings.**
+`text_to_vector` counts tokens after stop-word removal. Rationale: the
+similarity computation remains inspectable, and no additional API dependency is
+introduced. Trade-off: matching is lexical, so a query for "pricing" does not
+retrieve a note that consistently says "cost".
 
-**Word-frequency vectors instead of an embeddings API.** The search does real
-cosine similarity, but the vectors are word counts, which means I can print one
-and see exactly why a chunk ranked where it did. Calling an embeddings API
-would have worked immediately and taught me nothing about what's underneath.
-The cost is real: it only matches words a note literally contains, so "what did
-we decide about pricing?" won't find a note that says "cost" throughout.
-Swapping it out is a change to one function, `text_to_vector`, and it's the
-next thing I want to do.
+**Datetimes are naive throughout.**
+No timezone conversion is performed at any layer; all times are treated as
+wall-clock. Rationale: keeps interval and overlap logic readable. Trade-off:
+calendars spanning timezones display incorrect times, and `RRULE` `UNTIL` values
+written in UTC are interpreted as local time.
 
-**Naive datetimes everywhere.** No timezone handling at all — every datetime is
-wall-clock. I did this to keep the date math readable while I was still working
-out the overlap and interval logic. It's the thing I'd fix first if this had to
-be dependable: a calendar spanning timezones shows wrong times, and `RRULE` end
-dates written in UTC get read as local time, so a repeating series can end a
-few hours off.
+**Ranges are half-open and matched by overlap.**
+Every window is `[start, end)`, and an occurrence qualifies if it overlaps the
+window rather than being contained by it. Rationale: inclusive bounds place a
+midnight event in two weeks simultaneously, and containment excludes a
+13:00–14:30 meeting from a 14:00–14:15 query.
 
-**Half-open ranges and overlap instead of containment.** Every window is
-`[start, end)`, and an event counts if it *overlaps* the window rather than
-sitting inside it. Both rules are one line each and both prevent a whole
-category of bug: make the ends inclusive and a midnight event lands in two
-weeks at once; test for containment and a 13:00–14:30 meeting disappears when
-you ask about 14:00–14:15.
+**Tool errors are returned as text, not raised.**
+`run_tool` catches exceptions and returns the message. Rationale: a raised
+exception terminates the conversation, whereas a returned string is read by the
+model, which corrects its call on the next step. Trade-off: genuine defects
+surface as messages rather than stack traces.
 
-**Tool errors are returned as text, not raised.** When the model calls a tool
-with a date it doesn't understand, the tool hands back "I do not understand the
-date 'blorp', try 'today', 'next week'..." instead of throwing. A raised
-exception ends the conversation; a returned string gets read by the model,
-which then calls the tool correctly on its next step. The downside is that a
-real bug can surface as a polite message rather than a stack trace.
+**The clock is injected.**
+`config.NOW` is resolved once at import; `datetime.now()` is never called
+inline. Rationale: date-dependent functions become testable against a fixed
+date. Trade-off: with `CALENDAR_NOW=now` set, one test asserting the system
+prompt contains 3 August 2026 fails.
 
-**The clock is a setting, not `datetime.now()`.** Nothing reads the system
-clock inline; "now" comes from `config.NOW`. That's the only reason the
-date-dependent functions are testable, since the tests pin it to a fixed day.
-The side effect is that once you set `CALENDAR_NOW=now` in `.env`, one test
-fails — the one asserting the system prompt contains 3 August 2026. That's the
-test being date-dependent, not the app being broken.
+## Limitations
 
-## Still missing
+**Read-only.** Events cannot be created, modified, or deleted. Write access
+requires the OAuth route and an additional scope.
 
-- **It's read-only.** It answers questions but can't create, move, or delete
-  anything. That needs the OAuth route plus a write scope.
-- **Google's Birthdays calendar doesn't come through.** It's generated from
-  Contacts rather than stored in a calendar, so it's in neither the iCal export
-  nor the API response. Birthdays only appear if they exist as ordinary events.
-  Reading them properly means the People API and another OAuth scope.
-- **Individually-modified recurring events are ignored.** Move or cancel one
-  instance of a repeating meeting and the calendar records a `RECURRENCE-ID`
-  override, which the parser skips. That instance still shows at its original
-  time.
-- **Without an API key there are no real answers.** The offline fallback matches
-  keywords to pick a tool and prints the raw output. Enough to confirm the
-  plumbing works, not enough to hold a conversation.
+**Google's Birthdays calendar is unavailable.** It is generated from Contacts
+rather than stored in a calendar, and appears in neither the iCal export nor the
+API response. Birthdays are retrieved only where they exist as ordinary
+recurring events. Full support requires the People API and a second OAuth scope.
+
+**`RECURRENCE-ID` overrides are ignored.** An individually rescheduled or
+cancelled instance of a recurring event is recorded as a separate component,
+which the parser skips. The instance appears at its original time.
+
+**Lexical note matching.** See the word-frequency decision above. Replacing
+`text_to_vector` with an embeddings call is the intended next change.
+
+**No timezone support.** See the naive-datetime decision above.
+
+**Offline fallback is not a model.** Without `ANTHROPIC_API_KEY`, tool selection
+is regular-expression matching and the response is raw tool output.
 
 ---
 
-The sample calendar in `data/` and the notes in `data/notes/` are fictional.
-The test suite started from course scaffolding.
+The sample calendar in `data/` and the notes in `data/notes/` are fictional. The
+test suite originated as course scaffolding.
