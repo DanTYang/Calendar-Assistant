@@ -1,0 +1,9 @@
+python-dateutil>=2.9     # recurrence rule expansion
+anthropic>=0.40          # Claude API client
+python-dotenv>=1.0       # loads .env so secrets stay out of the source
+pytest>=8.0              # test suite
+
+# Needed only for --source api (the OAuth route).
+# --source url and the bundled sample calendar need nothing extra.
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2

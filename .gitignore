@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.env
+.DS_Store
+
+# Local data - never commit a real calendar or exported notes
+data/facts.json
+data/*.ics
+!data/sample_calendar.ics
+credentials.json
+token.json

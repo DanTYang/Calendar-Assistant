@@ -1,0 +1,156 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//cs101//calendar//EN
+X-WR-CALNAME:My Calendar
+BEGIN:VEVENT
+UID:standup
+DTSTART:20260525T093000
+DTEND:20260525T094500
+SUMMARY:Daily standup
+RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR
+EXDATE:20260805T093000
+LOCATION:Zoom
+ATTENDEE;CN=Priya Raghavan:mailto:priya@northstar.example
+ATTENDEE;CN=Marcus Bell:mailto:marcus@northstar.example
+ATTENDEE;CN=Ana Ortiz:mailto:ana@northstar.example
+END:VEVENT
+BEGIN:VEVENT
+UID:oneonone
+DTSTART:20260601T140000
+DTEND:20260601T143000
+SUMMARY:1:1 with Priya
+RRULE:FREQ=WEEKLY;BYDAY=TH
+LOCATION:Room 4B
+ATTENDEE;CN=Priya Raghavan:mailto:priya@northstar.example
+END:VEVENT
+BEGIN:VEVENT
+UID:planning
+DTSTART:20260608T100000
+DTEND:20260608T113000
+SUMMARY:Sprint planning
+RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO
+LOCATION:Room 2A
+ATTENDEE;CN=Priya Raghavan:mailto:priya@northstar.example
+ATTENDEE;CN=Marcus Bell:mailto:marcus@northstar.example
+ATTENDEE;CN=Ana Ortiz:mailto:ana@northstar.example
+ATTENDEE;CN=Tomas Lindqvist:mailto:tomas@northstar.example
+END:VEVENT
+BEGIN:VEVENT
+UID:focus
+DTSTART:20260608T130000
+DTEND:20260608T150000
+SUMMARY:Focus block
+RRULE:FREQ=WEEKLY;BYDAY=TU
+END:VEVENT
+BEGIN:VEVENT
+UID:vendor
+DTSTART:20260730T150000
+DTEND:20260730T160000
+SUMMARY:Northwind vendor contract review
+LOCATION:Room 3C
+DESCRIPTION:Reviewing the Northwind renewal before it expires on 30 Septem
+ ber. Legal flagged the auto-renewal clause. Grace is bringing revised pri
+ cing for the annual tier.
+ATTENDEE;CN=Grace Okafor:mailto:grace@vendor.example
+ATTENDEE;CN=Priya Raghavan:mailto:priya@northstar.example
+END:VEVENT
+BEGIN:VEVENT
+UID:budget
+DTSTART:20260723T110000
+DTEND:20260723T120000
+SUMMARY:Q3 budget review
+DESCRIPTION:Headcount plan and infrastructure spend for Q3.
+ATTENDEE;CN=Priya Raghavan:mailto:priya@northstar.example
+ATTENDEE;CN=Marcus Bell:mailto:marcus@northstar.example
+END:VEVENT
+BEGIN:VEVENT
+UID:migration
+DTSTART:20260806T130000
+DTEND:20260806T143000
+SUMMARY:Platform migration kickoff
+LOCATION:Room 2A
+DESCRIPTION:Kicking off the move off the legacy ingestion stack. Agenda: s
+ cope, the dual-write window, rollback criteria, and who owns the cutover 
+ runbook.
+ATTENDEE;CN=Marcus Bell:mailto:marcus@northstar.example
+ATTENDEE;CN=Tomas Lindqvist:mailto:tomas@northstar.example
+ATTENDEE;CN=Ana Ortiz:mailto:ana@northstar.example
+END:VEVENT
+BEGIN:VEVENT
+UID:allhands
+DTSTART:20260807T120000
+DTEND:20260807T130000
+SUMMARY:Company all-hands
+ATTENDEE;CN=Priya Raghavan:mailto:priya@northstar.example
+END:VEVENT
+BEGIN:VEVENT
+UID:dentist
+DTSTART:20260804T080000
+DTEND:20260804T090000
+SUMMARY:Dentist
+LOCATION:Dr Aliyev, 2nd Ave
+END:VEVENT
+BEGIN:VEVENT
+UID:retro
+DTSTART:20260813T150000
+DTEND:20260813T160000
+SUMMARY:Sprint retro
+ATTENDEE;CN=Priya Raghavan:mailto:priya@northstar.example
+ATTENDEE;CN=Marcus Bell:mailto:marcus@northstar.example
+ATTENDEE;CN=Ana Ortiz:mailto:ana@northstar.example
+ATTENDEE;CN=Tomas Lindqvist:mailto:tomas@northstar.example
+END:VEVENT
+BEGIN:VEVENT
+UID:bday-ana
+DTSTART;VALUE=DATE:19930807
+DTEND;VALUE=DATE:19930808
+SUMMARY:Ana Ortiz's Birthday
+RRULE:FREQ=YEARLY
+CATEGORIES:Birthday
+END:VEVENT
+BEGIN:VEVENT
+UID:bday-grace
+DTSTART;VALUE=DATE:19950812
+DTEND;VALUE=DATE:19950813
+SUMMARY:Grace Okafor's Birthday
+RRULE:FREQ=YEARLY
+CATEGORIES:Birthday
+END:VEVENT
+BEGIN:VEVENT
+UID:bday-marcus
+DTSTART;VALUE=DATE:19880819
+DTEND;VALUE=DATE:19880820
+SUMMARY:Marcus Bell's Birthday
+RRULE:FREQ=YEARLY
+CATEGORIES:Birthday
+END:VEVENT
+BEGIN:VEVENT
+UID:bday-priya
+DTSTART;VALUE=DATE:19900912
+DTEND;VALUE=DATE:19900913
+SUMMARY:Priya Raghavan's Birthday
+RRULE:FREQ=YEARLY
+CATEGORIES:Birthday
+END:VEVENT
+BEGIN:VEVENT
+UID:bday-tomas
+DTSTART;VALUE=DATE:19911103
+DTEND;VALUE=DATE:19911104
+SUMMARY:Tomas Lindqvist's Birthday
+RRULE:FREQ=YEARLY
+CATEGORIES:Birthday
+END:VEVENT
+BEGIN:VEVENT
+UID:pto
+DTSTART;VALUE=DATE:20260814
+DTEND;VALUE=DATE:20260817
+SUMMARY:PTO - long weekend
+END:VEVENT
+BEGIN:VEVENT
+UID:conf
+DTSTART;VALUE=DATE:20260827
+DTEND;VALUE=DATE:20260830
+SUMMARY:DataConf NYC
+LOCATION:Javits Center
+END:VEVENT
+END:VCALENDAR
