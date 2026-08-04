@@ -9,7 +9,6 @@ Choose where events come from with --source:
 
     --source file   data/sample_calendar.ics, or $CALENDAR_FILE  (default)
     --source url    a Google calendar's secret iCal address
-    --source api    the Google Calendar API, over OAuth
 """
 
 import sys
@@ -23,7 +22,7 @@ from assistant.llm import have_api_key
 # question the assistant can be asked, including yearly birthdays.
 HORIZON = timedelta(days=365)
 
-SOURCES = ("file", "url", "api")
+SOURCES = ("file", "url")
 
 
 def load_events(source="file"):
@@ -35,11 +34,9 @@ def load_events(source="file"):
     if source == "file":
         return ics_parser.load_calendar(config.CALENDAR_FILE)
 
-    from assistant import google_calendar
     if source == "url":
+        from assistant import google_calendar
         return google_calendar.load_from_url()
-    if source == "api":
-        return google_calendar.load_from_api()
     raise ValueError(f"unknown source {source!r}, expected one of {SOURCES}")
 
 

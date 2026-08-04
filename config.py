@@ -55,8 +55,7 @@ MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 # Google Calendar. None of this belongs in version control.
 #
 # GOOGLE_ICS_URL is a credential, not a location: anyone holding it can read
-# the whole calendar forever without logging in. Same for credentials.json and
-# token.json. .gitignore blocks all three.
+# the whole calendar forever without logging in. .gitignore blocks it via .env.
 # ---------------------------------------------------------------------------
 
 # Settings -> your calendar -> Integrate calendar -> "Secret address in iCal format"
@@ -65,11 +64,3 @@ GOOGLE_ICS_URL = os.environ.get("GOOGLE_ICS_URL", "")
 # Where `main.py cache` writes a local copy, so you can work offline.
 CACHED_ICS_FILE = Path(os.environ.get(
     "CACHED_ICS_FILE", PROJECT_ROOT / "data" / "google_cache.ics"))
-
-# OAuth: credentials.json is downloaded from the Google Cloud console;
-# token.json is written automatically after the first successful login.
-GOOGLE_CREDENTIALS_FILE = Path(os.environ.get(
-    "GOOGLE_CREDENTIALS_FILE", PROJECT_ROOT / "credentials.json"))
-GOOGLE_TOKEN_FILE = Path(os.environ.get(
-    "GOOGLE_TOKEN_FILE", PROJECT_ROOT / "token.json"))
-GOOGLE_CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID", "primary")

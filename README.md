@@ -11,14 +11,16 @@ callable tools. The model selects a tool, receives plain text back, and composes
 the reply. All date arithmetic, filtering, and ranking is performed in Python;
 the model performs none of it.
 
-Calendars are supported from three sources, all of which produce the same event
-dictionary:
+Calendars are read from either of two sources:
 
 | Source | Flag | Requirements |
 |---|---|---|
 | Google Calendar secret iCal URL | `--source url` | `GOOGLE_ICS_URL` |
-| Google Calendar API (OAuth) | `--source api` | `credentials.json`, two extra packages |
 | Local `.ics` file | `--source file` (default) | `CALENDAR_FILE` |
+
+Both produce identical event dictionaries. Google publishes every calendar at a
+private address ending in `/basic.ics`, so the remote source downloads
+iCalendar text and hands it to the same parser a local file uses.
 
 A calendar file stores recurrence rules, not individual meetings. A weekly
 standup is one entry with `RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR`; the instance
@@ -44,7 +46,7 @@ tool output. Every code path except answer phrasing is exercised.
 ## Architecture
 
 ```
-Google Calendar (secret iCal URL)
+Google Calendar (secret iCal URL)  or  local .ics file
         |
         v
 ics_parser      .ics text  ->  event dicts        one dict per rule
@@ -64,8 +66,9 @@ search          notes -> chunks -> vectors -> ranked matches
 ```
 
 The dictionary returned by `ics_parser.new_event()` is the interface between
-the calendar sources and everything downstream. A new source converts to that
-shape; no other module changes.
+the calendar sources and everything downstream. Remote calendar support is
+roughly forty lines because acquisition is separated from parsing: the bytes
+arriving over HTTP are the same iCalendar text a local file contains.
 
 ### Modules
 
@@ -77,7 +80,7 @@ shape; no other module changes.
 | [`search.py`](assistant/search.py) | Note chunking, word-frequency vectors, cosine similarity ranking. |
 | [`agent.py`](assistant/agent.py) | Tool schemas, system prompt, tool-dispatch loop (max 5 steps). |
 | [`memory.py`](assistant/memory.py) | Conversation history and facts persisted to disk. |
-| [`google_calendar.py`](assistant/google_calendar.py) | iCal URL downloader, Calendar API client, JSON-to-event conversion. |
+| [`google_calendar.py`](assistant/google_calendar.py) | Downloads and caches the secret iCal address. |
 | [`llm.py`](assistant/llm.py) | Claude API wrapper with an offline fallback model. |
 | [`config.py`](config.py) | Settings resolved from the environment, including the injected clock. |
 
@@ -121,8 +124,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Developed against Python 3.12. The `--source api` route additionally requires
-`google-api-python-client` and `google-auth-oauthlib`.
+Developed against Python 3.12. Dependencies are `python-dateutil`, `anthropic`,
+`python-dotenv`, and `pytest`.
 
 ### Configuration
 
@@ -143,7 +146,6 @@ cp .env.example .env
 | `NOTES_FOLDER` | `data/notes` | Directory of `.md` files to index |
 | `WORK_START_HOUR` | `9` | Lower bound for free-time search |
 | `WORK_END_HOUR` | `17` | Upper bound for free-time search |
-| `GOOGLE_CALENDAR_ID` | `primary` | Calendar read by `--source api` |
 
 `CALENDAR_NOW` defaults to a fixed date because the bundled sample calendar is
 built around 3 August 2026. Set it to `now` when using a real calendar.
@@ -153,8 +155,7 @@ calendar → Integrate calendar → **Secret address in iCal format**.
 
 > **The iCal URL is a credential.** It grants permanent read access to the
 > entire calendar without authentication and does not expire until reset. It
-> belongs in `.env`, which is git-ignored, along with `credentials.json` and
-> `token.json`.
+> belongs in `.env`, which is git-ignored.
 
 ### macOS certificate configuration
 
@@ -168,7 +169,7 @@ Python distributions from python.org install no root certificates, causing
 ## Usage
 
 ```bash
-python -m assistant.main [command] [--source file|url|api]
+python -m assistant.main [command] [--source file|url]
 ```
 
 | Command | Behaviour | Model required |
@@ -207,38 +208,24 @@ python -m assistant.main cache
 CALENDAR_FILE=data/google_cache.ics python -m assistant.main
 ```
 
-### Google Calendar API route
-
-Requires a Google Cloud project with the Calendar API enabled and an OAuth
-client of type *Desktop app*, downloaded to `credentials.json` in the project
-root. The first run opens a browser and writes `token.json`, which is reused
-afterwards. While the consent screen remains in *Testing* status, Google expires
-refresh tokens after seven days.
-
 ### Tests
 
 ```bash
 pytest -q
 ```
 
-76 tests, no network access required. Coverage includes parsing, recurrence
+66 tests, no network access required. Coverage includes parsing, recurrence
 expansion, every supported date phrase, overlap filtering, interval merging, the
-tool loop and its step limit, conversation trimming, similarity computation, and
-Google JSON conversion against recorded payloads.
+tool loop and its step limit, conversation trimming, and similarity computation.
 
 ## Design decisions
 
-**Recurrence is expanded locally, not by the Calendar API.**
-`fetch_api_events` requests master events with `singleEvents=False` and expands
-them in `recurrence.py`. Rationale: a single expansion path serves all three
-calendar sources. Trade-off: edge cases such as `RECURRENCE-ID` overrides become
-this project's responsibility, and one of them is unhandled.
-
-**The full calendar is fetched, not a date-bounded slice.**
-`timeMin` and `timeMax` apply to the master event rather than its instances, so
-a series beginning in 2019 or a birthday dated 1993 would be excluded before the
-current instance could be generated. Rationale: correctness of the window.
-Trade-off: more data transferred and slower startup on large calendars.
+**Calendar acquisition is separated from parsing.**
+`google_calendar.py` downloads bytes; `ics_parser.py` interprets them. Rationale:
+a remote calendar is the same iCalendar text as a local file, so no module below
+the parser needs to know where the text came from. Trade-off: sources that do
+not emit iCalendar would need a converter to the event dictionary rather than
+plugging straight in.
 
 **The model performs no date arithmetic.**
 Date phrases are passed through verbatim and resolved by `parse_when`. Rationale:
@@ -278,13 +265,13 @@ prompt contains 3 August 2026 fails.
 
 ## Limitations
 
-**Read-only.** Events cannot be created, modified, or deleted. Write access
-requires the OAuth route and an additional scope.
+**Read-only.** Events cannot be created, modified, or deleted. The iCal export
+is a read-only feed; writing would require the Google Calendar API with an
+authenticated write scope.
 
 **Google's Birthdays calendar is unavailable.** It is generated from Contacts
-rather than stored in a calendar, and appears in neither the iCal export nor the
-API response. Birthdays are retrieved only where they exist as ordinary
-recurring events. Full support requires the People API and a second OAuth scope.
+rather than stored in a calendar, and appears in no calendar export. Birthdays
+are retrieved only where they exist as ordinary recurring events.
 
 **`RECURRENCE-ID` overrides are ignored.** An individually rescheduled or
 cancelled instance of a recurring event is recorded as a separate component,
