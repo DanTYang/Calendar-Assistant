@@ -36,6 +36,17 @@ and the design decision the project is built around.
 - `recurrence.expand_event` nudges the lower bound back by the event duration
   so a meeting already in progress is generated before overlap is tested.
 
+## Secrets
+
+Settings come from the environment, loaded from a git-ignored `.env` by
+`config.py`. `.env.example` is committed and must never contain real values.
+
+`GOOGLE_ICS_URL` is a credential, not a location - it grants permanent
+read access to an entire calendar with no login. Never print it in full, never
+put it in a commit or a screenshot. Same for `credentials.json`, `token.json`,
+and any real exported `.ics`. `.gitignore` covers all of them; if one is about
+to be committed, stop and say so.
+
 ## Test data
 
 `data/sample_calendar.ics` and `data/notes/` are fictional and dated around

@@ -175,6 +175,20 @@ def parse_datetime(value):
         return datetime.strptime(value, "%Y%m%dT%H%M%S")
     raise ValueError(f"unrecognised timestamp {value!r} (length {len(value)})")
 
+def strip_until_marker(rule):
+    """Drop the UTC marker from an RRULE's UNTIL, matching parse_datetime.
+
+    dateutil compares UNTIL's timezone-awareness against DTSTART's. DTSTART is
+    naive here, so an UNTIL ending in Z raises ValueError before a single
+    occurrence is generated.
+    """
+    parts = []
+    for part in rule.split(";"):
+        if part.upper().startswith("UNTIL=") and part.endswith("Z"):
+            part = part[:-1]
+        parts.append(part)
+    return ";".join(parts)
+
 
 def new_event():
     """A blank event, so no downstream code has to guard against missing keys."""
@@ -234,7 +248,7 @@ def parse_events(text):
         elif name == "DTEND":
             event["end"] = parse_datetime(value)
         elif name == "RRULE":
-            event["rrule"] = value
+            event["rrule"] = strip_until_marker(value)
         elif name == "EXDATE":
             event["exdates"].extend(parse_datetime(d) for d in split_escaped(value))
         elif name == "CATEGORIES":
