@@ -49,6 +49,6 @@ to be committed, stop and say so.
 
 ## Test data
 
-`data/sample_calendar.ics` and `data/notes/` are fictional and dated around
+`data/sample_calendar.ics` and `data/sample_notes/` are fictional and dated around
 3 August 2026, which is why `config.DEMO_NOW` is pinned there. Changing either
 will break tests that assert specific events and dates.

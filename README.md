@@ -39,8 +39,6 @@ tool output. Every code path except answer phrasing is exercised.
 
 ## Demo
 
-<!-- Record a 10-20s terminal session and save it as docs/demo.gif -->
-
 ![Demo](docs/demo.gif)
 
 ## Architecture
@@ -59,7 +57,7 @@ queries         occurrences + question -> text    filtering, date math, interval
         |
         +------ agent      selects a tool, reads the result, composes the answer
         |                        ^
-data/notes/*.md                  |
+data/sample_notes/*.md           |
         |                        |
         v                        |
 search          notes -> chunks -> vectors -> ranked matches
@@ -125,7 +123,7 @@ pip install -r requirements.txt
 ```
 
 Developed against Python 3.12. Dependencies are `python-dateutil`, `anthropic`,
-`python-dotenv`, and `pytest`.
+and `python-dotenv`.
 
 ### Configuration
 
@@ -143,7 +141,7 @@ cp .env.example .env
 | `GOOGLE_ICS_URL` | unset | Secret iCal address, required for `--source url` |
 | `CALENDAR_FILE` | `data/sample_calendar.ics` | Local calendar for `--source file` |
 | `CALENDAR_NOW` | pinned to 2026-08-03 09:00 | Set to `now` to use the system clock |
-| `NOTES_FOLDER` | `data/notes` | Directory of `.md` files to index |
+| `NOTES_FOLDER` | `data/sample_notes` | Directory of `.md` files to index |
 | `WORK_START_HOUR` | `9` | Lower bound for free-time search |
 | `WORK_END_HOUR` | `17` | Upper bound for free-time search |
 
@@ -208,16 +206,6 @@ python -m assistant.main cache
 CALENDAR_FILE=data/google_cache.ics python -m assistant.main
 ```
 
-### Tests
-
-```bash
-pytest -q
-```
-
-66 tests, no network access required. Coverage includes parsing, recurrence
-expansion, every supported date phrase, overlap filtering, interval merging, the
-tool loop and its step limit, conversation trimming, and similarity computation.
-
 ## Design decisions
 
 **Calendar acquisition is separated from parsing.**
@@ -259,9 +247,10 @@ surface as messages rather than stack traces.
 
 **The clock is injected.**
 `config.NOW` is resolved once at import; `datetime.now()` is never called
-inline. Rationale: date-dependent functions become testable against a fixed
-date. Trade-off: with `CALENDAR_NOW=now` set, one test asserting the system
-prompt contains 3 August 2026 fails.
+inline. Rationale: every date-dependent function can be exercised against a
+fixed date rather than whatever today happens to be. Trade-off: `CALENDAR_NOW`
+must be set explicitly for real use, and forgetting it silently returns results
+for 3 August 2026.
 
 ## Limitations
 
@@ -287,5 +276,5 @@ is regular-expression matching and the response is raw tool output.
 
 ---
 
-The sample calendar in `data/` and the notes in `data/notes/` are fictional. The
-test suite originated as course scaffolding.
+The sample calendar in `data/` and the notes in `data/sample_notes/` are
+fictional.

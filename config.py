@@ -21,7 +21,7 @@ except ImportError:  # optional - the app runs fine on real env vars alone
 CALENDAR_FILE = Path(os.environ.get(
     "CALENDAR_FILE", PROJECT_ROOT / "data" / "sample_calendar.ics"))
 NOTES_FOLDER = Path(os.environ.get(
-    "NOTES_FOLDER", PROJECT_ROOT / "data" / "notes"))
+    "NOTES_FOLDER", PROJECT_ROOT / "data" / "sample_notes"))
 FACTS_FILE = Path(os.environ.get(
     "FACTS_FILE", PROJECT_ROOT / "data" / "facts.json"))
 

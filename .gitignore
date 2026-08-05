@@ -12,3 +12,7 @@ data/*.ics
 !data/sample_calendar.ics
 credentials.json
 token.json
+
+# Test suite - kept local, not published
+tests/
+pytest.ini
