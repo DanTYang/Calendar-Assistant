@@ -190,13 +190,16 @@ python -m assistant.main --source url
 ```
 
 ```
-you > what's on my calendar tomorrow?
-you > when am I free for 90 minutes on Thursday?
-you > what did we decide about the Northwind renewal?
-you > quit
+Q> what's on my calendar tomorrow?
+   (used find_events with {'when': 'tomorrow'})
+
+A> You have two things tomorrow: ...
+
+Q> quit
 ```
 
-Each turn prints the selected tool and its arguments before the answer.
+Questions are prompted with `Q>` and answers prefixed with `A>`. Each turn
+prints the selected tool and its arguments before the answer.
 
 To avoid re-downloading the calendar on every start, cache it and read the
 cached file:
@@ -273,6 +276,33 @@ which the parser skips. The instance appears at its original time.
 
 **Offline fallback is not a model.** Without `ANTHROPIC_API_KEY`, tool selection
 is regular-expression matching and the response is raw tool output.
+
+## Future features
+
+Ordered roughly by how much new machinery each one drags in.
+
+- **Create events.** A `create_event` tool, with an explicit confirmation turn:
+  the assistant restates the event it is about to write and only calls the API
+  after the user agrees. Create only — no edit or delete, so a misread request
+  cannot destroy anything. Requires the Google Calendar API with an
+  authenticated write scope; the iCal feed this project reads is read-only.
+
+- **Proactive travel help.** When an event carries a location, offer to look up
+  how to get there — "you're in New York at 14:00, want train times?" — backed
+  by a real transit/directions tool the model can call alongside `find_events`.
+  Requires a maps or transit API and a key for it, the first external
+  dependency besides Anthropic.
+
+- **General chatbot manner.** Beyond travel: follow-up questions, remembering
+  what the last turn was about, offering the obvious next action rather than
+  waiting to be asked. Mostly system-prompt and conversation-handling work.
+
+- **RESTful service.** Expose the agent over HTTP (post a message, get an
+  answer), a browser front-end with message bubbles, and per-user sessions:
+  separate calendar, notes, conversation history, and facts for each account.
+  The largest change of the four — `memory.py` currently persists a single
+  global conversation, so state would have to become per-user, and accounts
+  bring authentication with them.
 
 ---
 

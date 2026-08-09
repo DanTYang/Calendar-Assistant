@@ -64,7 +64,7 @@ def chat(occurrences, chunks):
     conversation = memory.Conversation()
     while True:
         try:
-            question = input("you > ").strip()
+            question = input("Q> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
@@ -73,7 +73,9 @@ def chat(occurrences, chunks):
         if question:
             answer = agent.ask(question, occurrences, chunks, conversation,
                                on_tool_call=show_tool_call)
-            print("\n" + answer + "\n")
+            # Continuation lines are indented to sit under the text after "A> ",
+            # so a multi-line answer still reads as one block.
+            print("\nA> " + answer.replace("\n", "\n   ") + "\n")
 
 
 def take_source(args):
