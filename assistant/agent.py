@@ -153,6 +153,13 @@ Choosing a tool: birthdays -> upcoming_birthdays; what was said, decided or
 agreed -> search_notes; anything about the schedule -> find_events; when
 someone is free -> find_free_time.
 
+When the user asks for a number of events and the range you tried holds fewer,
+widen it and search again instead of asking permission to look further: "next
+30 days", then "next 90 days", then "next 365 days". Stop widening once you
+have enough, or once a year has been searched - then answer with what you
+found and say how far you looked. The same goes for any search that comes back
+emptier than the question implies: try a wider range before reporting nothing.
+
 Keep answers short and lead with the dates and times."""
 
 

@@ -11,6 +11,7 @@ Choose where events come from with --source:
     --source url    a Google calendar's secret iCal address
 """
 
+import atexit
 import sys
 from datetime import timedelta
 
@@ -22,7 +23,7 @@ from assistant.llm import have_api_key
 # question the assistant can be asked, including yearly birthdays.
 HORIZON = timedelta(days=365)
 
-SOURCES = ("file", "url")
+SOURCES = ("file", "url", "api")
 
 
 def load_events(source="file"):
@@ -37,6 +38,10 @@ def load_events(source="file"):
     if source == "url":
         from assistant import google_calendar
         return google_calendar.load_from_url()
+
+    if source == "api":
+        from assistant import google_api
+        return google_api.load_from_api()
     raise ValueError(f"unknown source {source!r}, expected one of {SOURCES}")
 
 
@@ -78,6 +83,15 @@ def chat(occurrences, chunks):
             print("\nA> " + answer.replace("\n", "\n   ") + "\n")
 
 
+def _sign_out_on_exit():
+    """Leave nothing signed-in behind when the session ends."""
+    from assistant import google_api
+    if google_api.sign_out():
+        print("\nSigned out: token revoked with Google and deleted.")
+    else:
+        print(f"\nToken deleted ({config.TOKEN_FILE.name}).")
+
+
 def take_source(args):
     """Pull `--source X` out of the argument list, leaving the command behind."""
     if "--source" not in args:
@@ -90,6 +104,7 @@ def take_source(args):
 
 def main():
     args = sys.argv[1:]
+    source_given = "--source" in args
     source = take_source(args)
     command = args[0] if args else "chat"
 
@@ -97,6 +112,48 @@ def main():
         from assistant import google_calendar
         print(f"Saved a copy to {google_calendar.cache_from_url()}")
         return 0
+
+    # Sign-in needs no calendar loaded, and reading a few events back is the
+    # proof that the token works. On success this falls through to the chat
+    # session below rather than returning.
+    if command == "login":
+        from assistant import google_api
+        while True:
+            try:
+                upcoming = google_api.list_upcoming()
+                break
+            except google_api.AuthError as error:
+                # Every AuthError message already says what to do about it.
+                print(f"\nSign-in failed. {error}\n")
+                try:
+                    again = input("Try signing in with Google again? [y/N] ")
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return 1
+                if again.strip().lower() not in {"y", "yes"}:
+                    print("Not signed in.")
+                    return 1
+                print()
+
+        # Not "token saved" - a still-valid token is reused without a rewrite.
+        print(f"Authorized. Token: {config.TOKEN_FILE}\n")
+        for start, summary in upcoming:
+            print(f"  {start}  {summary}")
+        if not upcoming:
+            print("  (no upcoming events on the primary calendar)")
+        print()
+
+        # Read back through the account just signed in to, rather than the
+        # sample calendar or the feed. The token is already in hand, and unlike
+        # the feed the API shows a change the moment it is made. An explicit
+        # --source always wins.
+        if not source_given:
+            source = "api"
+
+        # Registered rather than wrapped in try/finally so it also runs when
+        # the session ends by exception, not only on a clean quit.
+        if config.REVOKE_ON_EXIT:
+            atexit.register(_sign_out_on_exit)
 
     try:
         events, occurrences, chunks = load_everything(source)

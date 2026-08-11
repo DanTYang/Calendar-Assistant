@@ -9,6 +9,7 @@ work without one.
 import os
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).parent
 
@@ -45,11 +46,29 @@ def _resolve_now():
 
 NOW = _resolve_now()
 
+# The one timezone this assistant assumes you are in.
+#
+# Everything inside the project stays naive - the interval and overlap logic is
+# far easier to read that way, and it is correct as long as one zone is assumed.
+# This setting exists for the edges where Google will not accept a naive time:
+# creating an event, and asking for travel times.
+#
+# A zone name, not an offset. "EST" is -05:00 year round, so it is wrong from
+# March to November; "America/New_York" tracks daylight saving on its own.
+TIMEZONE = ZoneInfo(os.environ.get("CALENDAR_TIMEZONE", "America/New_York"))
+
 # Working hours, used when looking for free time.
 WORK_START_HOUR = int(os.environ.get("WORK_START_HOUR", 9))
 WORK_END_HOUR = int(os.environ.get("WORK_END_HOUR", 17))
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+
+# How hard the model thinks before answering, and the main cost lever: thinking
+# is billed as output tokens, the expensive side. "low" suits this project -
+# Python does every date calculation, so the model is choosing a tool and
+# phrasing a result, not reasoning through anything. Raise it to "medium" or
+# "high" if answers start missing the point.
+MODEL_EFFORT = os.environ.get("ANTHROPIC_EFFORT", "low")
 
 # ---------------------------------------------------------------------------
 # Google Calendar. None of this belongs in version control.
@@ -64,3 +83,26 @@ GOOGLE_ICS_URL = os.environ.get("GOOGLE_ICS_URL", "")
 # Where `main.py cache` writes a local copy, so you can work offline.
 CACHED_ICS_FILE = Path(os.environ.get(
     "CACHED_ICS_FILE", PROJECT_ROOT / "data" / "google_cache.ics"))
+
+# OAuth, for the authorized API path that the read-only iCal feed cannot cover.
+# credentials.json identifies this application and is downloaded from the Google
+# Cloud console. token.json is written on first sign-in and holds the access and
+# refresh tokens - it is a live credential, not a cache. Both are git-ignored.
+CREDENTIALS_FILE = Path(os.environ.get(
+    "CREDENTIALS_FILE", PROJECT_ROOT / "credentials.json"))
+TOKEN_FILE = Path(os.environ.get(
+    "TOKEN_FILE", PROJECT_ROOT / "token.json"))
+
+# Hand the token back to Google and delete it when a signed-in session ends, so
+# nothing usable is left on disk. The cost is a browser consent on every single
+# run - there is no saved token to reuse, by design. Set REVOKE_ON_EXIT=0 to
+# keep the token between sessions instead.
+REVOKE_ON_EXIT = os.environ.get("REVOKE_ON_EXIT", "1").lower() not in {
+    "0", "false", "no"}
+
+# How long to wait for the browser to come back during sign-in. Declining the
+# consent screen redirects with an error, but abandoning it - "Back to safety"
+# on the unverified-app warning, or just closing the tab - sends nothing, and
+# without a deadline the sign-in waits forever with no output. Long enough to
+# read a warning, pick an account, and consent.
+AUTH_TIMEOUT_SECONDS = int(os.environ.get("AUTH_TIMEOUT_SECONDS", 120))

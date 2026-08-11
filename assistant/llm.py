@@ -52,6 +52,11 @@ def call_model(system, messages, tools=None, max_tokens=1200):
         "max_tokens": max_tokens,
         "system": system,
         "messages": messages,
+        # Effort is nested here, not top-level. Thinking itself is left alone:
+        # it stays adaptive, because a model with thinking switched off reaches
+        # for tools less readily, and every answer in this project comes from a
+        # tool.
+        "output_config": {"effort": config.MODEL_EFFORT},
     }
     if tools:
         kwargs["tools"] = tools

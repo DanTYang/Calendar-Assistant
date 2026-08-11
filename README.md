@@ -11,16 +11,22 @@ callable tools. The model selects a tool, receives plain text back, and composes
 the reply. All date arithmetic, filtering, and ranking is performed in Python;
 the model performs none of it.
 
-Calendars are read from either of two sources:
+Calendars are read from any of three sources:
 
 | Source | Flag | Requirements |
 |---|---|---|
-| Google Calendar secret iCal URL | `--source url` | `GOOGLE_ICS_URL` |
 | Local `.ics` file | `--source file` (default) | `CALENDAR_FILE` |
+| Google Calendar secret iCal URL | `--source url` | `GOOGLE_ICS_URL` |
+| Google Calendar API | `--source api` | `credentials.json`, see **Signing in** |
 
-Both produce identical event dictionaries. Google publishes every calendar at a
-private address ending in `/basic.ics`, so the remote source downloads
-iCalendar text and hands it to the same parser a local file uses.
+All three produce identical event dictionaries. Google publishes every calendar
+at a private address ending in `/basic.ics`, so the `url` source downloads
+iCalendar text and hands it to the same parser a local file uses. The `api`
+source signs in with OAuth and converts Google's JSON into the same shape.
+
+**Prefer `api` for a real calendar.** It is the only source that sees a change
+immediately — Google caches the iCal feed and can take hours to publish one —
+and the only one that can eventually write. `login` selects it by default.
 
 A calendar file stores recurrence rules, not individual meetings. A weekly
 standup is one entry with `RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR`; the instance
@@ -123,7 +129,8 @@ pip install -r requirements.txt
 ```
 
 Developed against Python 3.12. Dependencies are `python-dateutil`, `anthropic`,
-and `python-dotenv`.
+and `python-dotenv`, plus `google-auth-oauthlib` and `google-api-python-client`
+for the authorized API path.
 
 ### Configuration
 
@@ -176,6 +183,7 @@ python -m assistant.main [command] [--source file|url]
 | `agenda "<phrase>"` | Prints events in a date range | No |
 | `birthdays` | Prints upcoming birthdays | No |
 | `cache` | Downloads `GOOGLE_ICS_URL` to `data/google_cache.ics` | No |
+| `login` | Signs in with Google via the browser, writes `token.json`, lists a few events | No |
 
 Verify the calendar loads before starting a chat session:
 
@@ -230,11 +238,14 @@ similarity computation remains inspectable, and no additional API dependency is
 introduced. Trade-off: matching is lexical, so a query for "pricing" does not
 retrieve a note that consistently says "cost".
 
-**Datetimes are naive throughout.**
-No timezone conversion is performed at any layer; all times are treated as
-wall-clock. Rationale: keeps interval and overlap logic readable. Trade-off:
-calendars spanning timezones display incorrect times, and `RRULE` `UNTIL` values
-written in UTC are interpreted as local time.
+**Datetimes are naive throughout, and converted only at the edges.**
+Every layer works in wall-clock time and assumes a single zone, set by
+`CALENDAR_TIMEZONE`. Rationale: keeps interval and overlap logic readable.
+Conversion happens exactly where a source states an offset and nowhere else —
+`parse_datetime` on a `Z`-marked timestamp, and the API converter on the
+offsets Google sends. Trade-off: a `TZID` naming a different zone is taken at
+face value, and `RRULE` `UNTIL` values written in UTC are still read as local,
+which can carry a series a few hours past its intended end.
 
 **Ranges are half-open and matched by overlap.**
 Every window is `[start, end)`, and an occurrence qualifies if it overlaps the
@@ -272,7 +283,16 @@ which the parser skips. The instance appears at its original time.
 **Lexical note matching.** See the word-frequency decision above. Replacing
 `text_to_vector` with an embeddings call is the intended next change.
 
-**No timezone support.** See the naive-datetime decision above.
+**The iCal feed lags.** Google caches the secret address and can take hours to
+publish a change, so `--source url` may not show an event that already exists —
+including one this assistant just created. `--source api` reads through the
+Calendar API and reflects a change immediately.
+
+**A `TZID` naming another zone is read as local.** Times are converted only
+where the source states an offset: a `Z` in the feed, or the offset the API
+sends. An event written `TZID=Europe/London` is taken at face value rather than
+converted, so it displays at London's wall-clock time. `CALENDAR_TIMEZONE`
+assumes one zone, and this is the edge of that assumption.
 
 **Offline fallback is not a model.** Without `ANTHROPIC_API_KEY`, tool selection
 is regular-expression matching and the response is raw tool output.

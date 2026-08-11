@@ -21,8 +21,10 @@ wall-clock time, so a UTC "Z" suffix or a numeric offset is discarded rather
 than converted.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import config
 
 # Default durations for an event whose DTEND is missing.
 DEFAULT_DURATION = timedelta(hours=1)
@@ -159,21 +161,42 @@ def parse_line(line):
 def parse_datetime(value):
     """Turn an iCalendar timestamp into a naive datetime.
 
-        "20260803T093000"   -> datetime(2026, 8, 3, 9, 30)
+        "20260803T093000"   -> datetime(2026, 8, 3, 9, 30)   already local
         "20260803"          -> datetime(2026, 8, 3)          a whole day
-        "20260803T093000Z"  -> datetime(2026, 8, 3, 9, 30)   UTC marker dropped
+        "20260803T093000Z"  -> datetime(2026, 8, 3, 5, 30)   UTC, converted
+
+    Naive datetimes are a deliberate simplification everywhere else, but a
+    trailing Z is information, not noise: it says the digits are UTC. Dropping
+    the marker and keeping them would read 09:30 UTC as 09:30 local, and
+    Google's export writes most timed events that way - so the whole calendar
+    would sit hours off. The marker is honoured here and nowhere else: the
+    value is read as UTC, converted to `config.TIMEZONE`, and made naive again
+    so nothing downstream has to care.
+
+    A timestamp with no marker is already local and is left exactly as it is.
     """
     value = value.strip()
-    if value.endswith("Z"):
+
+    utc = value.endswith("Z")
+    if utc:
         value = value[:-1]
     elif len(value) > 15 and value[-5] in "+-":
+        # An explicit numeric offset is still truncated. iCalendar carries the
+        # zone in a TZID parameter or the Z marker, so this is malformed input
+        # rather than anything a calendar actually writes.
         value = value[:-5]
 
     if len(value) == 8:
-        return datetime.strptime(value, "%Y%m%d")
-    if len(value) == 15:
-        return datetime.strptime(value, "%Y%m%dT%H%M%S")
-    raise ValueError(f"unrecognised timestamp {value!r} (length {len(value)})")
+        stamp = datetime.strptime(value, "%Y%m%d")
+    elif len(value) == 15:
+        stamp = datetime.strptime(value, "%Y%m%dT%H%M%S")
+    else:
+        raise ValueError(f"unrecognised timestamp {value!r} (length {len(value)})")
+
+    if utc:
+        stamp = stamp.replace(tzinfo=timezone.utc).astimezone(
+            config.TIMEZONE).replace(tzinfo=None)
+    return stamp
 
 def strip_until_marker(rule):
     """Drop the UTC marker from an RRULE's UNTIL, matching parse_datetime.
