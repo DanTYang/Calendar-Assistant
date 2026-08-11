@@ -59,7 +59,7 @@ def show_tool_call(name, args):
     print(f"   (used {name} with {args})")
 
 
-def chat(occurrences, chunks):
+def chat(occurrences, chunks, source):
     """Read questions from the terminal until the user quits."""
     print(f"Today is {config.NOW:%A %d %B %Y}.")
     if not have_api_key():
@@ -77,7 +77,8 @@ def chat(occurrences, chunks):
             return
         if question:
             answer = agent.ask(question, occurrences, chunks, conversation,
-                               on_tool_call=show_tool_call)
+                               on_tool_call=show_tool_call,
+                               source=source)
             # Continuation lines are indented to sit under the text after "A> ",
             # so a multi-line answer still reads as one block.
             print("\nA> " + answer.replace("\n", "\n   ") + "\n")
@@ -177,7 +178,7 @@ def main():
     elif command == "birthdays":
         print(queries.upcoming_birthdays(occurrences, config.NOW))
     else:
-        chat(occurrences, chunks)
+        chat(occurrences, chunks, source)
     return 0
 
 

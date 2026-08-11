@@ -192,17 +192,24 @@ def _rfc3339(when):
 
 
 def _to_event(item):
-    """Convert one API event into the dictionary the rest of the project reads.
+    """Convert one standalone API event into the project's dictionary.
 
-    Returns None for records that have no place in that shape: cancelled
-    events, and the separate entries Google writes for a single rescheduled
-    instance of a recurring series. Skipping the latter is not an oversight -
-    it is the same limitation the `.ics` parser has with `RECURRENCE-ID`, kept
-    deliberately so both sources behave alike.
+    Returns None for records that are not standalone events: cancelled ones,
+    and the separate entries Google writes for a single altered occurrence of a
+    series. Those are overrides rather than events in their own right, and
+    `load_from_api` deals with them; see `_convert` for the conversion itself.
     """
     if item.get("status") == "cancelled" or item.get("recurringEventId"):
         return None
+    return _convert(item)
 
+
+def _convert(item):
+    """Turn any API event record into the project's dictionary.
+
+    Split out from `_to_event` because an override needs converting too, and
+    the only difference is whether the record is allowed to stand alone.
+    """
     start = item.get("start") or {}
     end = item.get("end") or {}
     if not (start.get("dateTime") or start.get("date")):
@@ -230,7 +237,7 @@ def _to_event(item):
         name, _, value = line.partition(":")
         name = name.upper()
         if name.startswith("RRULE"):
-            event["rrule"] = ics_parser.strip_until_marker(value)
+            event["rrule"] = ics_parser.localise_until(value)
         elif name.startswith("EXDATE"):
             event["exdates"].extend(
                 ics_parser.parse_datetime(part)
@@ -272,6 +279,7 @@ def load_from_api(horizon_days=400):
     }
 
     events = []
+    overrides = []
     page_token = None
     while True:
         try:
@@ -281,15 +289,64 @@ def load_from_api(horizon_days=400):
             raise AuthError(_explain_http_error(error)) from error
 
         for item in response.get("items", []):
-            event = _to_event(item)
-            if event is not None:
-                events.append(event)
+            if item.get("recurringEventId"):
+                overrides.append(item)
+            else:
+                event = _to_event(item)
+                if event is not None:
+                    events.append(event)
 
         # A busy calendar runs past one page, and a silently truncated calendar
         # is worse than a slow one.
         page_token = response.get("nextPageToken")
         if not page_token:
-            return events
+            return _apply_overrides(events, overrides)
+
+
+def _apply_overrides(events, overrides):
+    """Fold each altered occurrence back into the series it belongs to.
+
+    A recurrence rule is a formula, not a list, so a single changed occurrence
+    cannot be edited in place: Google records it as a separate entry saying
+    "instead of the one that would fall at this time, use this". Applying that
+    means two things, and both happen here rather than anywhere downstream:
+
+      - the original time joins the rule's exclusions, so the formula stops
+        producing an occurrence there
+      - the replacement is added as an ordinary one-off event, unless the
+        occurrence was cancelled rather than moved, in which case nothing
+        replaces it
+
+    `recurrence.expand_event` therefore needs no knowledge of any of this. It
+    already skips excluded dates and expands rules that have none, which is
+    exactly what an override reduces to once it has been unpacked.
+    """
+    by_uid = {event["uid"]: event for event in events}
+
+    for item in overrides:
+        master = by_uid.get(item.get("recurringEventId"))
+        original = item.get("originalStartTime") or {}
+        stamp = original.get("dateTime") or original.get("date")
+        if master is None or not stamp:
+            # The series falls outside the window we asked for. Without its
+            # rule there is nothing to exclude the occurrence from, so leaving
+            # the override out is the only honest option.
+            continue
+
+        master["exdates"].append(_naive(stamp))
+
+        # A cancelled occurrence is a hole, not a replacement.
+        if item.get("status") == "cancelled":
+            continue
+
+        moved = _convert(item)
+        if moved is not None:
+            # It stands alone now: the rule it came from is already handled.
+            moved["rrule"] = ""
+            moved["exdates"] = []
+            events.append(moved)
+
+    return events
 
 
 def _parse_clock(text):
@@ -431,33 +488,117 @@ def _resolve_one(occurrences, summary, when, verb):
                       "Ask the user which one they mean, then use a more "
                       "specific title or a single date.")
 
-    target = matches[0]
-    if target["rrule"]:
-        return None, (f"{target['summary']!r} repeats. Acting on it would "
-                      "affect the entire series rather than this one "
-                      f"occurrence, so I have {verb} nothing. Changing a "
-                      "single occurrence of a repeating event is not "
-                      "supported yet.")
-
-    return target, None
+    return matches[0], None
 
 
-def delete_event(occurrences, summary, when, confirm=False):
+def _needs_scope(target, scope, verb):
+    """Refuse to guess between one occurrence and a whole series.
+
+    A repeating event is a rule, and "move Monday's standup" could mean the one
+    on Monday or every Monday there will ever be. The difference is not
+    recoverable once acted on, and nothing in the request distinguishes them.
+    """
+    if not target["rrule"] or scope in ("this", "following", "series"):
+        return None
+    return (f"{target['summary']!r} repeats, so I have {verb} nothing yet. Ask "
+            "the user which they mean, then call again with one of: "
+            f"scope='this' for only the occurrence on {target['start']:%a %d %b}, "
+            "scope='following' for that one and every later one, or "
+            "scope='series' for all of them.")
+
+
+def _rrule_capped_before(rrule, boundary, remaining):
+    """Split one recurrence rule into the part before a date and the part after.
+
+    This is the only scope that really divides a series. Moving or cancelling a
+    single occurrence leaves the rule alone and records an exception, but "this
+    and everything after it" changes the rule itself from a point onward - so
+    the original is capped just before that point, and a second rule carries on
+    from it.
+
+    Returns `(before, after)` as RRULE values.
+
+    `COUNT` is the awkward part: a rule that runs five times cannot simply be
+    copied into both halves, or the series doubles in length. It is dropped
+    from the first half, which is bounded by UNTIL instead, and set on the
+    second to however many occurrences actually remain.
+    """
+    parts = [p for p in rrule.split(";") if p]
+    keep = [p for p in parts
+            if not p.upper().startswith(("UNTIL=", "COUNT="))]
+
+    # UNTIL is inclusive, so stop a second before the boundary occurrence. It is
+    # written in UTC with the Z that iCalendar requires; `localise_until`
+    # takes it off again on the way back in.
+    edge = (boundary - timedelta(seconds=1)).replace(
+        tzinfo=config.TIMEZONE).astimezone(timezone.utc)
+    before = ";".join(keep + [f"UNTIL={edge:%Y%m%dT%H%M%S}Z"])
+
+    after = ";".join(keep)
+    had_count = any(p.upper().startswith("COUNT=") for p in parts)
+    old_until = next((p for p in parts if p.upper().startswith("UNTIL=")), None)
+    if had_count:
+        after = ";".join(keep + [f"COUNT={remaining}"])
+    elif old_until:
+        after = ";".join(keep + [old_until])
+    return before, after
+
+
+def _instance_id(master_uid, start):
+    """Google's own id for one occurrence of a series.
+
+    Editing a single occurrence means addressing that occurrence, and Google
+    gives it an id of its own. Asking rather than constructing the id keeps
+    this working whatever format it happens to take.
+    """
+    window = timedelta(days=1)
+    try:
+        result = get_service().events().instances(
+            calendarId="primary", eventId=master_uid,
+            timeMin=_rfc3339(start - window),
+            timeMax=_rfc3339(start + window)).execute()
+    except HttpError as error:
+        raise AuthError(_explain_http_error(error)) from error
+
+    for item in result.get("items", []):
+        field = item.get("start") or {}
+        stamp = field.get("dateTime") or field.get("date")
+        if stamp and _naive(stamp) == start:
+            return item["id"]
+    return None
+
+
+def delete_event(occurrences, summary, when, scope=None, confirm=False):
     """Remove an event from the calendar, in two calls like `create_event`."""
     target, problem = _resolve_one(occurrences, summary, when, "deleted")
     if problem:
         return problem
+    problem = _needs_scope(target, scope, "deleted")
+    if problem:
+        return problem
 
+    one_of_many = bool(target["rrule"]) and scope == "this"
     if not confirm:
+        reach = ("this one occurrence" if one_of_many
+                 else "the entire repeating series" if target["rrule"]
+                 else "this event")
         return ("About to delete:\n\n"
                 f"  {queries.format_event(target)}\n\n"
-                "This cannot be undone. Nothing has been deleted yet. Show "
+                f"This removes {reach}, and cannot be undone. Nothing has been "
+                "deleted yet. Show "
                 "this to the user, and only if they agree, call delete_event "
                 "again with the same arguments and confirm=true.")
 
+    event_id = target["uid"]
+    if one_of_many:
+        event_id = _instance_id(target["uid"], target["start"])
+        if event_id is None:
+            return ("I could not find that occurrence on the calendar, so "
+                    "nothing was deleted. It may already be gone.")
+
     try:
         get_service().events().delete(
-            calendarId="primary", eventId=target["uid"]).execute()
+            calendarId="primary", eventId=event_id).execute()
     except HttpError as error:
         if getattr(error.resp, "status", None) in (404, 410):
             # Already gone. Drop it locally so the session stops offering it.
@@ -467,13 +608,80 @@ def delete_event(occurrences, summary, when, confirm=False):
                     "calendar. Removed it from this session.")
         raise AuthError(_explain_http_error(error)) from error
 
-    occurrences[:] = [o for o in occurrences if o["uid"] != target["uid"]]
+    if one_of_many:
+        occurrences[:] = [o for o in occurrences
+                          if not (o["uid"] == target["uid"]
+                                  and o["start"] == target["start"])]
+    else:
+        occurrences[:] = [o for o in occurrences if o["uid"] != target["uid"]]
     return f"Deleted:\n\n  {queries.format_event(target)}"
+
+
+def _split_series(occurrences, target, moved):
+    """Cap a series at one occurrence and start a new one from there.
+
+    Two writes, in the order that fails safely. The cap goes first: if the
+    second write never happens the calendar has a shortened series and a gap,
+    which is visible and fixable. Creating first and failing to cap would leave
+    every remaining occurrence duplicated instead - the same dates twice, from
+    two rules, which is far harder to spot and to undo.
+    """
+    remaining = sum(1 for o in occurrences
+                    if o["uid"] == target["uid"] and o["start"] >= target["start"])
+    before, after = _rrule_capped_before(
+        target["rrule"], target["start"], remaining)
+
+    service = get_service()
+    try:
+        service.events().patch(
+            calendarId="primary", eventId=target["uid"],
+            body={"recurrence": [f"RRULE:{before}"]}).execute()
+    except HttpError as error:
+        raise AuthError(_explain_http_error(error)) from error
+
+    zone = str(config.TIMEZONE)
+    fresh = {
+        "summary": moved["summary"],
+        "recurrence": [f"RRULE:{after}"],
+        "start": {"dateTime": moved["start"].isoformat(), "timeZone": zone},
+        "end": {"dateTime": moved["end"].isoformat(), "timeZone": zone},
+    }
+    if moved["location"]:
+        fresh["location"] = moved["location"]
+    if moved["description"]:
+        fresh["description"] = moved["description"]
+
+    try:
+        created = service.events().insert(
+            calendarId="primary", body=fresh).execute()
+    except HttpError as error:
+        raise AuthError(
+            "The old series was shortened, but the replacement could not be "
+            f"created: {_explain_http_error(error)}") from error
+
+    # Keep the occurrences the capped rule still produces rather than
+    # regenerating them. `target` is the occurrence that was matched, not the
+    # series' original start, so a rule rebuilt from it would begin at the
+    # boundary and end one second earlier - generating nothing at all, and
+    # silently dropping every occurrence before the split.
+    occurrences[:] = [o for o in occurrences
+                      if not (o["uid"] == target["uid"]
+                              and o["start"] >= target["start"])]
+    replacement = _to_event(created)
+    if replacement is not None:
+        window = timedelta(days=365)
+        occurrences.extend(recurrence.expand_event(
+            replacement, config.NOW - window, config.NOW + window))
+    occurrences.sort(key=lambda occurrence: occurrence["start"])
+
+    return ("Split the series:\n\n"
+            f"  up to    {target['start']:%a %d %b}  unchanged\n"
+            f"  from     {queries.format_event(moved)}")
 
 
 def update_event(occurrences, summary, when, new_when=None, new_start_time=None,
                  new_duration_minutes=None, new_summary=None,
-                 new_location=None, confirm=False):
+                 new_location=None, scope=None, confirm=False):
     """Change an existing event, sending only the fields that differ.
 
     Uses Google's `patch`, which leaves everything it is not told about alone.
@@ -490,7 +698,12 @@ def update_event(occurrences, summary, when, new_when=None, new_start_time=None,
     target, problem = _resolve_one(occurrences, summary, when, "changed")
     if problem:
         return problem
+    problem = _needs_scope(target, scope, "changed")
+    if problem:
+        return problem
 
+    one_of_many = bool(target["rrule"]) and scope == "this"
+    splits_series = bool(target["rrule"]) and scope == "following"
     nothing_asked = all(field is None for field in (
         new_when, new_start_time, new_duration_minutes, new_summary,
         new_location))
@@ -532,10 +745,15 @@ def update_event(occurrences, summary, when, new_when=None, new_start_time=None,
         moved["end"] = moved["start"] + length
 
     if not confirm:
+        reach = ("this one occurrence" if one_of_many
+                 else f"this occurrence and every later one, splitting the "
+                      f"series at {target['start']:%a %d %b}" if splits_series
+                 else "every occurrence in the series" if target["rrule"]
+                 else "this event")
         return ("About to change:\n\n"
                 f"  from  {queries.format_event(target)}\n"
                 f"    to  {queries.format_event(moved)}\n\n"
-                "Nothing has been changed yet. Show this to the user and only "
+                f"This affects {reach}. Nothing has been changed yet. Show this to the user and only "
                 "if they agree, call update_event again with the same "
                 "arguments and confirm=true.")
 
@@ -562,20 +780,42 @@ def update_event(occurrences, summary, when, new_when=None, new_start_time=None,
     if not body:
         return "That is already how the event looks. Nothing to change."
 
+    if splits_series:
+        return _split_series(occurrences, target, moved)
+
+    event_id = target["uid"]
+    if one_of_many:
+        event_id = _instance_id(target["uid"], target["start"])
+        if event_id is None:
+            return ("I could not find that occurrence on the calendar, so "
+                    "nothing was changed.")
+
     try:
         patched = get_service().events().patch(
-            calendarId="primary", eventId=target["uid"], body=body).execute()
+            calendarId="primary", eventId=event_id, body=body).execute()
     except HttpError as error:
         raise AuthError(_explain_http_error(error)) from error
 
-    # Replace the old occurrences with whatever Google says the event is now.
-    stored = _to_event(patched)
-    occurrences[:] = [o for o in occurrences if o["uid"] != target["uid"]]
-    if stored is not None:
-        window = timedelta(days=365)
-        occurrences.extend(recurrence.expand_event(
-            stored, config.NOW - window, config.NOW + window))
-        occurrences.sort(key=lambda occurrence: occurrence["start"])
+    window = timedelta(days=365)
+    if one_of_many:
+        # Google answered with an override record. Fold it in the way a fresh
+        # load would: drop the occurrence the rule produced, add the
+        # replacement standing on its own.
+        occurrences[:] = [o for o in occurrences
+                          if not (o["uid"] == target["uid"]
+                                  and o["start"] == target["start"])]
+        stored = _convert(patched)
+        if stored is not None:
+            stored["rrule"] = ""
+            stored["exdates"] = []
+            occurrences.append(stored)
+    else:
+        stored = _to_event(patched)
+        occurrences[:] = [o for o in occurrences if o["uid"] != target["uid"]]
+        if stored is not None:
+            occurrences.extend(recurrence.expand_event(
+                stored, config.NOW - window, config.NOW + window))
+    occurrences.sort(key=lambda occurrence: occurrence["start"])
 
     return ("Changed:\n\n"
             f"  from  {queries.format_event(target)}\n"

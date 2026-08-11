@@ -198,17 +198,24 @@ def parse_datetime(value):
             config.TIMEZONE).replace(tzinfo=None)
     return stamp
 
-def strip_until_marker(rule):
-    """Drop the UTC marker from an RRULE's UNTIL, matching parse_datetime.
+def localise_until(rule):
+    """Rewrite an RRULE's UNTIL from UTC into local time, matching parse_datetime.
 
-    dateutil compares UNTIL's timezone-awareness against DTSTART's. DTSTART is
-    naive here, so an UNTIL ending in Z raises ValueError before a single
-    occurrence is generated.
+    dateutil compares UNTIL's timezone-awareness against DTSTART's, and DTSTART
+    is naive here, so an UNTIL ending in Z raises before a single occurrence is
+    generated. Simply dropping the Z avoids the error and introduces a quieter
+    one: the digits are UTC, so the rule then runs hours past where it should.
+    A series capped just before an occurrence would still emit that occurrence.
+
+    Converting instead keeps the comparison naive and the boundary correct.
     """
     parts = []
     for part in rule.split(";"):
         if part.upper().startswith("UNTIL=") and part.endswith("Z"):
-            part = part[:-1]
+            # parse_datetime already knows how to read a Z-marked timestamp
+            # into local time; reuse it rather than repeat the conversion.
+            local = parse_datetime(part.split("=", 1)[1])
+            part = f"UNTIL={local:%Y%m%dT%H%M%S}"
         parts.append(part)
     return ";".join(parts)
 
@@ -271,7 +278,7 @@ def parse_events(text):
         elif name == "DTEND":
             event["end"] = parse_datetime(value)
         elif name == "RRULE":
-            event["rrule"] = strip_until_marker(value)
+            event["rrule"] = localise_until(value)
         elif name == "EXDATE":
             event["exdates"].extend(parse_datetime(d) for d in split_escaped(value))
         elif name == "CATEGORIES":

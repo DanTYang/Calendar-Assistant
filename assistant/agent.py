@@ -108,7 +108,7 @@ TOOLS = [
             "delete_event. Then give only the fields that should change - "
             "anything you leave out keeps its current value, so moving an "
             "event to Friday keeps its time, and changing its time keeps its "
-            "day. Repeating events cannot be changed."
+            "day. A repeating event needs scope; see that field."
         ),
         "input_schema": {
             "type": "object",
@@ -147,6 +147,17 @@ TOOLS = [
                     "type": "string",
                     "description": "New location. Omit to keep the current one.",
                 },
+                "scope": {
+                    "type": "string",
+                    "enum": ["this", "following", "series"],
+                    "description": (
+                        "Required only when the event repeats, and never "
+                        "guessed: 'this' affects only the occurrence on the "
+                        "day given, 'following' affects that one and every "
+                        "later one, and 'series' affects all of them. Ask the "
+                        "user which they mean before choosing."
+                    ),
+                },
                 "confirm": CONFIRM_FIELD,
             },
             "required": ["summary", "when"],
@@ -159,7 +170,7 @@ TOOLS = [
             + TWO_PHASE +
             "Identify the event by its title and the day it falls on. If "
             "several events match, nothing is deleted and you must ask the "
-            "user which one they mean. Repeating events cannot be deleted."
+            "user which one they mean. A repeating event needs scope; see that field."
         ),
         "input_schema": {
             "type": "object",
@@ -177,6 +188,17 @@ TOOLS = [
                     "description": (
                         "The day or range the event falls in: 'tomorrow', "
                         "'friday', 'next week', or a date like '2026-08-15'."
+                    ),
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["this", "following", "series"],
+                    "description": (
+                        "Required only when the event repeats, and never "
+                        "guessed: 'this' affects only the occurrence on the "
+                        "day given, 'following' affects that one and every "
+                        "later one, and 'series' affects all of them. Ask the "
+                        "user which they mean before choosing."
                     ),
                 },
                 "confirm": CONFIRM_FIELD,
@@ -319,7 +341,26 @@ emptier than the question implies: try a wider range before reporting nothing.
 Keep answers short and lead with the dates and times."""
 
 
-def run_tool(name, args, occurrences, chunks):
+# The tools that change a calendar, and the only source able to reach one.
+WRITING_TOOLS = {"create_event", "update_event", "delete_event"}
+WRITABLE_SOURCE = "api"
+
+
+def tools_for(source):
+    """The tools worth offering when reading from `source`.
+
+    Writing always acts on the signed-in account's primary calendar, so a
+    session reading a local file or the cached feed could create a real event
+    on a calendar it is not showing. Withholding the tools is better than
+    refusing the call: a tool the model cannot see is one it cannot misuse, and
+    it never has to explain a refusal it did not expect.
+    """
+    if source == WRITABLE_SOURCE:
+        return TOOLS
+    return [tool for tool in TOOLS if tool["name"] not in WRITING_TOOLS]
+
+
+def run_tool(name, args, occurrences, chunks, source=WRITABLE_SOURCE):
     """Run the tool the model asked for and return its output as text.
 
     Errors are returned rather than raised. That looks wrong until you notice
@@ -330,6 +371,12 @@ def run_tool(name, args, occurrences, chunks):
 
     Errors a model can read are information. Errors that crash are not.
     """
+    # Belt and braces. `tools_for` already keeps these out of the model's
+    # reach; this catches a call that arrives some other way.
+    if name in WRITING_TOOLS and source != WRITABLE_SOURCE:
+        return (f"{name} needs --source {WRITABLE_SOURCE}. This session is "
+                f"reading from {source!r}, and writing would change a "
+                "different calendar from the one being shown.")
     try:
         if name == "find_events":
             return queries.find_events(occurrences, **args)
@@ -373,7 +420,8 @@ def build_system_prompt():
     return f"{prompt}\n\n{facts}" if facts else prompt
 
 
-def ask(question, occurrences, chunks, conversation=None, on_tool_call=None):
+def ask(question, occurrences, chunks, conversation=None, on_tool_call=None,
+        source=WRITABLE_SOURCE):
     """Answer one question, running whatever tools the model asks for.
 
     `on_tool_call(name, args)` is invoked before each tool runs - watching the
@@ -385,7 +433,8 @@ def ask(question, occurrences, chunks, conversation=None, on_tool_call=None):
     system = build_system_prompt()
 
     for _ in range(MAX_STEPS):
-        reply = call_model(system, conversation.recent(), tools=TOOLS)
+        reply = call_model(system, conversation.recent(),
+                           tools=tools_for(source))
         # The model's own reply must be stored before the tool results: the API
         # requires each tool_use block and its tool_result to sit next to each
         # other, in that order.
@@ -399,7 +448,8 @@ def ask(question, occurrences, chunks, conversation=None, on_tool_call=None):
             if on_tool_call:
                 on_tool_call(call["name"], call["input"])
             results.append((call["id"],
-                            run_tool(call["name"], call["input"], occurrences, chunks)))
+                            run_tool(call["name"], call["input"], occurrences,
+                                  chunks, source)))
         conversation.add_tool_results(results)
 
     return (f"I used too many steps ({MAX_STEPS}) without reaching an answer. "

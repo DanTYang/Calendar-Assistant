@@ -125,8 +125,8 @@ Writing — each requires `--source api` and a signed-in account:
 | Tool | Parameters | Returns |
 |---|---|---|
 | `create_event` | `summary`, `when`, optional `start_time`, `duration_minutes`, `location`, `description`, `confirm` | The event it would create, or the created event |
-| `update_event` | `summary`, `when`, optional `new_when`, `new_start_time`, `new_duration_minutes`, `new_summary`, `new_location`, `confirm` | The event before and after, or the applied change |
-| `delete_event` | `summary`, `when`, optional `confirm` | The event it would remove, or confirmation that it is gone |
+| `update_event` | `summary`, `when`, optional `new_when`, `new_start_time`, `new_duration_minutes`, `new_summary`, `new_location`, `scope`, `confirm` | The event before and after, or the applied change |
+| `delete_event` | `summary`, `when`, optional `scope`, `confirm` | The event it would remove, or confirmation that it is gone |
 
 The writing tools share one contract, defined once in `agent.TWO_PHASE` and
 interpolated into all three descriptions. The first call resolves the request
@@ -134,6 +134,37 @@ and changes nothing; the second, carrying `confirm`, performs it. Three
 hand-written copies of that instruction drifted in practice — only
 `delete_event` picked up an extra confirmation from the model — which is why it
 now has a single definition.
+
+They are also offered only when the session can reach the calendar it would
+write to. `agent.tools_for` hands out the reading tools alone unless the source
+is `api`, so a session showing a local file cannot quietly change a real
+calendar. A tool the model never sees is one it cannot misuse, and one it never
+has to explain refusing.
+
+### Changing a repeating event
+
+A recurrence rule is a formula, not a list of events, so a single occurrence
+cannot be edited in place. `scope` says what a change means, and is never
+guessed — the tools refuse an `RRULE` target until told which:
+
+| `scope` | What happens |
+|---|---|
+| `this` | Google records an override for that occurrence. The rule is untouched |
+| `following` | The rule really does split: the original is capped with `UNTIL`, and a second rule carries on from the boundary |
+| `series` | The rule itself is changed |
+
+Only `following` divides anything. `_rrule_capped_before` handles the awkward
+part — a rule bounded by `COUNT` cannot be copied into both halves, so the
+first is bounded by `UNTIL` instead and the second gets however many
+occurrences remain. The cap is written before the replacement is created: a
+failure between the two leaves a short series and a visible gap, where the
+other order would duplicate every remaining occurrence from two rules at once.
+
+Reading them back is where the split *appears* even for `this`.
+`_apply_overrides` turns each override into the two things `recurrence.py`
+already understands — the original time joins the rule's exclusions, and the
+replacement becomes an ordinary one-off event. A cancelled occurrence is an
+exclusion with nothing replacing it. `recurrence.py` needed no changes at all.
 
 Tool errors are returned to the model as text rather than raised. An
 unrecognised date phrase produces the list of supported phrases, which the model
@@ -413,17 +444,11 @@ for 3 August 2026.
 
 ## Limitations
 
-**Repeating events cannot be changed or deleted.** Google acts on the rule, not
-the occurrence, so removing "Monday's standup" would remove every standup there
-will ever be. Both writing tools refuse a target carrying an `RRULE` rather than
-act on the whole series. Telling one instance apart from its series is the
-remaining piece of work, and it is the same problem as the `RECURRENCE-ID`
-limitation below.
-
-**Writing is not pinned to the source being read.** The writing tools always act
-on the signed-in account's primary calendar, whatever `--source` is set to — so
-a session reading the bundled sample calendar can still create a real event.
-`login` prints the account it signed in as for exactly this reason.
+**Only the API source understands a changed occurrence.** `--source api` folds
+Google's override records back into the series it belongs to; the `.ics` parser
+still skips the equivalent `RECURRENCE-ID` components. So a moved occurrence
+appears at its new time under `--source api` and at its original time under
+`--source url`. The two sources agree on everything else.
 
 **Google's Birthdays calendar is unavailable.** It is generated from Contacts
 rather than stored in a calendar, and appears in no calendar export. Birthdays
@@ -454,13 +479,11 @@ is regular-expression matching and the response is raw tool output.
 
 Ordered roughly by how much new machinery each one drags in.
 
-- **Editing one occurrence of a repeating event.** Both writing tools currently
-  refuse anything with an `RRULE`. Supporting it means identifying an event as
-  `(uid, original start)` rather than by uid alone, and choosing between this
-  occurrence, the whole series, and this-and-following. It also means revisiting
-  the converter: `_to_event` deliberately skips the records Google writes for a
-  moved occurrence, so an edit made this way would currently be ignored on the
-  next load. One function, `_resolve_one`, is where the refusal lives.
+- **Teach the `.ics` parser about `RECURRENCE-ID`.** The API source folds
+  changed occurrences back into their series; the file and feed sources do not,
+  so the same calendar read two ways disagrees about a moved occurrence. The
+  logic already exists in `_apply_overrides` — it needs an equivalent in the
+  parser, working from `RECURRENCE-ID` components rather than Google's JSON.
 
 - **Proactive travel help.** When an event carries a location, offer to look up
   how to get there — "you're in New York at 14:00, want train times?" — backed
