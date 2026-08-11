@@ -17,6 +17,8 @@ JSON dump would and is easier for a model to quote back accurately.
 """
 
 import re
+import urllib.parse
+from collections import Counter
 from datetime import datetime, timedelta
 
 import config
@@ -304,4 +306,120 @@ def find_free_time(occurrences, when, duration_minutes=30):
 
     if not lines:
         return f"Nothing free between {start:%a %d %b} and {end - timedelta(days=1):%a %d %b}."
+    return "\n".join(lines)
+
+# Words that mean an event happens on a screen. Matched as substrings and
+# case-insensitively, because the field is prose: "Zoom Online Meeting",
+# "Join on Google Meet", a bare meet.google.com link.
+VIRTUAL_MARKERS = (
+    "zoom", "google meet", "meet.google.com", "hangout", "webex", "skype",
+    "microsoft teams", "ms teams", "teams.microsoft", "whereby",
+    "gotomeeting", "bluejeans", "online meeting", "virtual", "http://",
+    "https://",
+)
+
+# A room inside a building someone is already in. "Room 2A" is a real place and
+# a useless destination.
+ROOM_PREFIX = re.compile(
+    r"^(room|rm|conf(erence)?\s*room|meeting\s*room)\b", re.IGNORECASE)
+
+
+def location_kind(location):
+    """What sort of place, if any, an event's location names.
+
+    One of "none", "virtual", "internal", or "place".
+
+    The field is free text - iCalendar defines it that way and Google's API
+    says so outright - so this is a judgement rather than a lookup, and it errs
+    towards "place". Google Maps resolves "Javits Center" and "Newark EWR" as
+    readily as a full postal address, so the question is not "is this a valid
+    address" but "would offering directions here be absurd". Only two answers
+    are absurd: a video call, and a room in the building you are already in.
+    """
+    text = (location or "").strip()
+    if not text:
+        return "none"
+    lowered = text.lower()
+    if any(marker in lowered for marker in VIRTUAL_MARKERS):
+        return "virtual"
+    if ROOM_PREFIX.match(text):
+        return "internal"
+    return "place"
+
+
+def maps_url(destination, origin=None, mode=None):
+    """A Google Maps directions link.
+
+    Maps URLs are a documented, keyless scheme: no API key, no billing account,
+    no quota. That is the whole reason this tier exists. Answering "how long
+    will it take" in the assistant's own voice needs the Routes API, a billing
+    account, and a spend cap; handing over a link needs none of it and covers
+    most of what a person actually wants.
+
+    Omitting `origin` lets Maps start from wherever the user is.
+    """
+    params = {"api": "1", "destination": destination}
+    if origin:
+        params["origin"] = origin
+    if mode:
+        params["travelmode"] = mode
+    return "https://www.google.com/maps/dir/?" + urllib.parse.urlencode(params)
+
+
+def directions(occurrences, when, summary=None, origin=None, mode=None):
+    """Directions links for the events in a range that have somewhere to go.
+
+    Events without a usable destination are reported rather than dropped. A
+    silent omission reads as "there is nothing on Thursday", which is a
+    different and wrong answer.
+    """
+    start, end = parse_when(when, config.NOW)
+    origin = origin or config.HOME_ADDRESS or None
+
+    # Match the title or the location. People name a destination as often as
+    # an event - "how do I get to the Javits Center" is about a place, and
+    # nothing in the title says "Javits".
+    wanted = summary.strip().lower() if summary else None
+    matches = [
+        occurrence for occurrence in occurrences
+        if occurrence["start"] < end and occurrence["end"] > start
+        and (wanted is None
+             or wanted in occurrence["summary"].lower()
+             or wanted in occurrence["location"].lower())
+    ]
+    if not matches:
+        label = f"{summary!r} in {when!r}" if summary else repr(when)
+        return f"No events found for {label}."
+
+    routable, skipped = [], []
+    for occurrence in matches:
+        kind = location_kind(occurrence["location"])
+        (routable if kind == "place" else skipped).append((occurrence, kind))
+
+    lines = [f"{format_event(occurrence)}\n"
+             f"    {maps_url(occurrence['location'], origin, mode)}"
+             for occurrence, _ in routable]
+
+    reasons = {"none": "no location set",
+               "virtual": "online",
+               "internal": "a room, not a destination"}
+
+    # Naming every skipped event is right when the question was about one
+    # thing, and useless across a month: a single link buried under thirty
+    # lines of "no location set" reads worse than no answer. Past a handful,
+    # count them instead.
+    if len(skipped) > 3 and routable:
+        tally = Counter(reasons[kind] for _, kind in skipped)
+        summarised = ", ".join(f"{count} {reason}"
+                               for reason, count in tally.most_common())
+        lines.append(f"\n{len(skipped)} others need no directions "
+                     f"({summarised}).")
+    else:
+        lines.extend(f"{format_event(occurrence)}\n"
+                     f"    no directions - {reasons[kind]}"
+                     for occurrence, kind in skipped)
+
+    if routable and origin:
+        lines.append(f"\nDirections start from {origin}. "
+                     "Say where you are setting off from to change that.")
     return "\n".join(lines)

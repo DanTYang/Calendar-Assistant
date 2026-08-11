@@ -57,6 +57,11 @@ NOW = _resolve_now()
 # March to November; "America/New_York" tracks daylight saving on its own.
 TIMEZONE = ZoneInfo(os.environ.get("CALENDAR_TIMEZONE", "America/New_York"))
 
+# Where directions start from when nothing else is known. The calendar knows
+# where an event is, never where you are, so without this every link begins at
+# "wherever the phone is" - fine on a phone, useless from a laptop.
+HOME_ADDRESS = os.environ.get("HOME_ADDRESS", "")
+
 # Working hours, used when looking for free time.
 WORK_START_HOUR = int(os.environ.get("WORK_START_HOUR", 9))
 WORK_END_HOUR = int(os.environ.get("WORK_END_HOUR", 17))

@@ -207,6 +207,52 @@ TOOLS = [
         },
     },
     {
+        "name": "directions",
+        "description": (
+            "Get Google Maps directions links for events that have somewhere "
+            "to travel to. Use this when the user asks how to get somewhere, "
+            "how far away an event is, or when to set off - and offer it "
+            "yourself when an event is somewhere they would have to travel. "
+            "Call it directly. Do NOT search with find_events first: this tool "
+            "does its own looking, and its 'summary' matches the location as "
+            "well as the title, so it finds an event by where it is held when "
+            "find_events cannot. "
+            "Events that are online, in a meeting room, or have no location "
+            "are reported as such rather than skipped. This returns a link, "
+            "not a travel time: do not state durations it did not give you."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "when": {
+                    "type": "string",
+                    "description": "Date range to look in, such as 'tomorrow' or 'friday'.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "Optional words from the event's title or its "
+                        "location, to pick one out of the range - 'Javits' "
+                        "finds an event held there whatever it is called."
+                    ),
+                },
+                "origin": {
+                    "type": "string",
+                    "description": (
+                        "Where the journey starts. Omit unless the user says - "
+                        "a link with no origin starts from wherever they are."
+                    ),
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["driving", "transit", "walking", "bicycling"],
+                    "description": "How they are travelling, if they said.",
+                },
+            },
+            "required": ["when"],
+        },
+    },
+    {
         "name": "find_events",
         "description": (
             "List calendar events in a date range. Use this for any question "
@@ -338,6 +384,34 @@ have enough, or once a year has been searched - then answer with what you
 found and say how far you looked. The same goes for any search that comes back
 emptier than the question implies: try a wider range before reporting nothing.
 
+When an event is somewhere the user would have to travel to, offer directions
+rather than waiting to be asked - one short question after the answer, not a
+paragraph. Do not offer for anything online or in a meeting room. The
+directions tool returns a link and no travel time, so never state how long a
+journey takes.
+
+How to talk:
+
+Follow the thread. "it", "that one", "the same day", "move it instead" refer to
+whatever was just discussed - resolve them from the conversation rather than
+asking again. Never re-ask something the user has already settled: if they have
+said which event, or which day, that answer still stands later in the same
+conversation.
+
+Offer the obvious next step as one short question, never a menu of options.
+Directions after an event they have to travel to; the next free slot after
+telling them a day is full; the rest of the week after a single day. When there
+is no obvious next step, stop - a trailing question on every answer is worse
+than none.
+
+Ask before acting only where the answers differ materially: which of two
+events, or one occurrence against a whole series. Everywhere else make the
+sensible choice and say which you made, rather than handing the decision back.
+
+When someone mentions a standing preference - where they usually work, a time
+of day that suits them, what they call something - save it with remember_fact.
+It is only worth saving if it would still be true next week.
+
 Keep answers short and lead with the dates and times."""
 
 
@@ -382,6 +456,8 @@ def run_tool(name, args, occurrences, chunks, source=WRITABLE_SOURCE):
             return queries.find_events(occurrences, **args)
         if name == "upcoming_birthdays":
             return queries.upcoming_birthdays(occurrences, config.NOW, **args)
+        if name == "directions":
+            return queries.directions(occurrences, **args)
         if name == "find_free_time":
             return queries.find_free_time(occurrences, **args)
         if name == "search_notes":

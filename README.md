@@ -119,6 +119,7 @@ Reading:
 | `upcoming_birthdays` | `within_days` | Birthdays in the window, sorted by proximity |
 | `search_notes` | `query` | Highest-ranked note chunks with their source filenames |
 | `remember_fact` | `fact` | Confirmation; the fact is appended to every later system prompt |
+| `directions` | `when`, optional `summary`, `origin`, `mode` | Google Maps links for events worth travelling to, and why the others were skipped |
 
 Writing — each requires `--source api` and a signed-in account:
 
@@ -175,6 +176,54 @@ When a question asks for a number of events and the range searched holds fewer,
 the model widens it — 30 days, then 90, then a year — rather than asking
 permission to look further.
 
+### Conversation
+
+The assistant is meant to be talked to rather than queried. Three behaviours
+are asked for in the system prompt rather than built in code:
+
+- **It follows the thread.** "who else is in that one", "when am I free that
+  day", "move it instead" resolve against what was just discussed. Something
+  the user has already settled is not asked again.
+- **It offers the obvious next step**, as one short question and never a menu —
+  directions after an event worth travelling to, the next free slot after a
+  full day. When there is no obvious next step it stops, because a trailing
+  question on every answer is worse than none.
+- **It remembers standing preferences.** A usual office, a preferred time of
+  day, a name someone uses for something: saved with `remember_fact` and
+  appended to every later system prompt. The test is whether it would still be
+  true next week.
+
+Asking is reserved for choices where the answers differ materially — which of
+two events, one occurrence against a whole series. Everywhere else it decides
+and says what it decided, rather than handing the decision back.
+
+### Directions
+
+`directions` hands back a [Maps URL](https://developers.google.com/maps/documentation/urls/get-started):
+a documented, keyless scheme needing no API key, billing account, or quota.
+Answering *how long* a journey takes would need the Routes API and a payment
+method; handing over a link needs neither and covers most of what is actually
+wanted.
+
+The work is not the link, it is deciding what deserves one. `location_kind`
+reads the free-text location field and returns one of four answers:
+
+| Kind | Example | Result |
+|---|---|---|
+| `place` | `Javits Center`, `Newark EWR`, a full address | a link |
+| `virtual` | `Zoom`, `meet.google.com/...` | no link — it is online |
+| `internal` | `Room 2A`, `Conference Room B` | no link — a room, not a destination |
+| `none` | empty | no link — nothing to route to |
+
+It errs towards `place`, because Maps resolves a venue name or an airport code
+as readily as a postal address. The bar is not "is this a valid address" but
+"would offering directions here be absurd", and only two things are.
+
+Skipped events are named when there are few and counted when there are many —
+a single usable link buried under thirty lines of "no location set" reads worse
+than no answer. `summary` matches the location as well as the title, since
+people name the destination as often as the event.
+
 ### Supported date phrases
 
 `parse_when` accepts only the following. Anything else raises and returns the
@@ -226,6 +275,7 @@ cp .env.example .env
 | `NOTES_FOLDER` | `data/sample_notes` | Directory of `.md` files to index |
 | `FACTS_FILE` | `data/facts.json` | Where `remember_fact` persists what it is told |
 | `CACHED_ICS_FILE` | `data/google_cache.ics` | Where the `cache` command writes its copy |
+| `HOME_ADDRESS` | unset | Where directions start from. The calendar knows where an event is, never where you are; without this a link starts from wherever the device is. |
 | `WORK_START_HOUR` | `9` | Lower bound for free-time search |
 | `WORK_END_HOUR` | `17` | Upper bound for free-time search |
 | `CREDENTIALS_FILE` | `credentials.json` | OAuth client downloaded from the Google Cloud console |
@@ -485,15 +535,10 @@ Ordered roughly by how much new machinery each one drags in.
   logic already exists in `_apply_overrides` — it needs an equivalent in the
   parser, working from `RECURRENCE-ID` components rather than Google's JSON.
 
-- **Proactive travel help.** When an event carries a location, offer to look up
-  how to get there — "you're in New York at 14:00, want train times?" — backed
-  by a real transit/directions tool the model can call alongside `find_events`.
-  Requires a maps or transit API and a key for it, the first external
-  dependency besides Anthropic.
-
-- **General chatbot manner.** Beyond travel: follow-up questions, remembering
-  what the last turn was about, offering the obvious next action rather than
-  waiting to be asked. Mostly system-prompt and conversation-handling work.
+- **Travel times, not just links.** `directions` returns a Maps link; it cannot
+  say how long a journey takes or when to set off. That needs the Routes API, a
+  billing account, and a spend cap — and it is what would let `find_free_time`
+  know that a gap is not free if you are crossing town in it.
 
 - **RESTful service.** Expose the agent over HTTP (post a message, get an
   answer), a browser front-end with message bubbles, and per-user sessions:
