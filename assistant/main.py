@@ -120,6 +120,7 @@ def main():
         from assistant import google_api
         while True:
             try:
+                account, zone = google_api.signed_in_account()
                 upcoming = google_api.list_upcoming()
                 break
             except google_api.AuthError as error:
@@ -135,8 +136,14 @@ def main():
                     return 1
                 print()
 
-        # Not "token saved" - a still-valid token is reused without a rewrite.
-        print(f"Authorized. Token: {config.TOKEN_FILE}\n")
+        # The account matters more than the token path: every writing tool acts
+        # on "primary", so this line is the only thing saying which calendar
+        # that is.
+        print(f"Signed in as {account}  (calendar timezone: {zone})")
+        if zone and zone != str(config.TIMEZONE):
+            print(f"  Note: this project assumes {config.TIMEZONE}. Set "
+                  "CALENDAR_TIMEZONE to match, or times will be off.")
+        print()
         for start, summary in upcoming:
             print(f"  {start}  {summary}")
         if not upcoming:

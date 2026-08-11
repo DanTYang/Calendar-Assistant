@@ -23,11 +23,167 @@ from assistant.llm import call_model
 # hypothetical one, and every round costs a request.
 MAX_STEPS = 5
 
+# Every tool that changes the calendar follows the same two-call contract, so
+# it is written once. Repeating it three times invited them to drift, and they
+# did: delete_event alone picked up an extra confirmation from the model, which
+# asked before calling the tool at all - approving a guess rather than the
+# resolved event, and teaching the user to click through prompts.
+TWO_PHASE = (
+    "This tool takes TWO calls. Make the first call immediately, WITHOUT "
+    "confirm: it changes nothing and returns exactly what would happen. Do not "
+    "ask the user before that first call - its output is what you show them, "
+    "and it is more accurate than a description written from the request. "
+    "Then call again with the same arguments plus confirm=true, and only once "
+    "the user has agreed. Never pass confirm=true on the first call, and never "
+    "treat the original request as agreement: asking for something is not "
+    "approving the specific details worked out for it. "
+)
+
+# The `confirm` field is identical across the writing tools too.
+CONFIRM_FIELD = {
+    "type": "boolean",
+    "description": (
+        "Leave this out on the first call. Set it to true only after the user "
+        "has seen what the first call returned and agreed to it."
+    ),
+}
+
 # Each entry describes one function in words the model can act on. `description`
 # is not a comment for humans - it is the only thing the model uses to decide
 # whether this is the right tool, so vagueness here shows up as wrong tool
 # choices at runtime.
 TOOLS = [
+    {
+        "name": "create_event",
+        "description": (
+            "Add a new event to the calendar. " + TWO_PHASE +
+            "'when' must name a single day, such as 'tomorrow', 'friday', or "
+            "'2026-08-15'; a range like 'next week' is refused because it does "
+            "not say which day. Omit start_time for an all-day event."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Title of the event, such as 'Lunch with Priya'.",
+                },
+                "when": {
+                    "type": "string",
+                    "description": (
+                        "The single day the event falls on: 'tomorrow', "
+                        "'friday', 'next friday', or a date like '2026-08-15'."
+                    ),
+                },
+                "start_time": {
+                    "type": "string",
+                    "description": (
+                        "Start time in 24-hour HH:MM, such as '09:00' or "
+                        "'14:30'. Omit entirely for an all-day event."
+                    ),
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "description": "How long the event lasts. Defaults to 60.",
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Optional location.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional longer notes for the event.",
+                },
+                "confirm": CONFIRM_FIELD,
+            },
+            "required": ["summary", "when"],
+        },
+    },
+    {
+        "name": "update_event",
+        "description": (
+            "Change an existing event - its day, time, length, title, or "
+            "location. " + TWO_PHASE +
+            "Identify the event with summary and when, exactly as for "
+            "delete_event. Then give only the fields that should change - "
+            "anything you leave out keeps its current value, so moving an "
+            "event to Friday keeps its time, and changing its time keeps its "
+            "day. Repeating events cannot be changed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Words from the title of the event to change.",
+                },
+                "when": {
+                    "type": "string",
+                    "description": "The day or range the event currently falls in.",
+                },
+                "new_when": {
+                    "type": "string",
+                    "description": (
+                        "Move it to this day - a single day such as 'friday' "
+                        "or '2026-08-20'. Omit to keep the current day."
+                    ),
+                },
+                "new_start_time": {
+                    "type": "string",
+                    "description": (
+                        "New start time in 24-hour HH:MM. Omit to keep the "
+                        "current time."
+                    ),
+                },
+                "new_duration_minutes": {
+                    "type": "integer",
+                    "description": "New length in minutes. Omit to keep the current length.",
+                },
+                "new_summary": {
+                    "type": "string",
+                    "description": "New title. Omit to keep the current one.",
+                },
+                "new_location": {
+                    "type": "string",
+                    "description": "New location. Omit to keep the current one.",
+                },
+                "confirm": CONFIRM_FIELD,
+            },
+            "required": ["summary", "when"],
+        },
+    },
+    {
+        "name": "delete_event",
+        "description": (
+            "Remove an event from the calendar. Deleting cannot be undone. "
+            + TWO_PHASE +
+            "Identify the event by its title and the day it falls on. If "
+            "several events match, nothing is deleted and you must ask the "
+            "user which one they mean. Repeating events cannot be deleted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "Words from the event's title. Matching is partial and "
+                        "case-insensitive, so 'dentist' finds 'Dentist "
+                        "appointment'."
+                    ),
+                },
+                "when": {
+                    "type": "string",
+                    "description": (
+                        "The day or range the event falls in: 'tomorrow', "
+                        "'friday', 'next week', or a date like '2026-08-15'."
+                    ),
+                },
+                "confirm": CONFIRM_FIELD,
+            },
+            "required": ["summary", "when"],
+        },
+    },
     {
         "name": "find_events",
         "description": (
@@ -186,6 +342,17 @@ def run_tool(name, args, occurrences, chunks):
         if name == "remember_fact":
             memory.save_fact(args["fact"])
             return f"Saved: {args['fact']}"
+        if name == "create_event":
+            # Imported here rather than at the top: the Google libraries and a
+            # sign-in are only needed by someone who actually writes.
+            from assistant import google_api
+            return google_api.create_event(occurrences, **args)
+        if name == "delete_event":
+            from assistant import google_api
+            return google_api.delete_event(occurrences, **args)
+        if name == "update_event":
+            from assistant import google_api
+            return google_api.update_event(occurrences, **args)
         # Models occasionally invent a tool name.
         return f"There is no tool called {name!r}."
     except Exception as error:

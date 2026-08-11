@@ -1,7 +1,8 @@
 # Calendar Assistant
 
 A command-line assistant that answers natural-language questions about a Google
-Calendar and a folder of markdown meeting notes, using the Claude API.
+Calendar and a folder of markdown meeting notes, and can add, change, and remove
+events, using the Claude API.
 
 ## Overview
 
@@ -10,6 +11,12 @@ occurrences, indexes a folder of notes, and exposes both to a language model as
 callable tools. The model selects a tool, receives plain text back, and composes
 the reply. All date arithmetic, filtering, and ranking is performed in Python;
 the model performs none of it.
+
+Writing follows the same rule. The model never computes a date and never writes
+unprompted: it names a day the way the user said it, and every tool that changes
+the calendar takes two calls — one that resolves the request and describes it
+without touching anything, and a second, after the user agrees, that performs
+the change.
 
 Calendars are read from any of three sources:
 
@@ -50,29 +57,41 @@ tool output. Every code path except answer phrasing is exercised.
 ## Architecture
 
 ```
-Google Calendar (secret iCal URL)  or  local .ics file
-        |
-        v
-ics_parser      .ics text  ->  event dicts        one dict per rule
-        |
-        v
+local .ics file    secret iCal URL    Google Calendar API
+        |                 |                    |
+        v                 v                    v
+     ics_parser  .ics text -> event dicts   google_api  JSON -> event dicts
+        |                 |                    |
+        +-----------------+--------------------+
+                          |
+                          v
 recurrence      rules      ->  dated occurrences  expands RRULE, removes EXDATEs
-        |
-        v
+                          |
+                          v
 queries         occurrences + question -> text    filtering, date math, intervals
-        |
-        +------ agent      selects a tool, reads the result, composes the answer
-        |                        ^
-data/sample_notes/*.md           |
-        |                        |
-        v                        |
-search          notes -> chunks -> vectors -> ranked matches
+                          |
+        +-----------------+------ agent   selects a tool, reads the result,
+        |                 |                      composes the answer
+data/sample_notes/*.md    |                        ^
+        |                 |                        |
+        v                 v                        |
+search   notes -> chunks -> vectors -> ranked matches
+                          |
+                          v
+google_api      create / update / delete  ->  Google Calendar API
+                writes, then re-reads the response back into occurrences
 ```
 
 The dictionary returned by `ics_parser.new_event()` is the interface between
 the calendar sources and everything downstream. Remote calendar support is
 roughly forty lines because acquisition is separated from parsing: the bytes
-arriving over HTTP are the same iCalendar text a local file contains.
+arriving over HTTP are the same iCalendar text a local file contains, and the
+API source converts Google's JSON into that same dictionary rather than
+introducing a second shape.
+
+Writes run in the other direction and end by reading back. What Google returns
+from a write is the event as it now exists, so that response — not the request —
+is converted and spliced into the live occurrence list.
 
 ### Modules
 
@@ -85,22 +104,45 @@ arriving over HTTP are the same iCalendar text a local file contains.
 | [`agent.py`](assistant/agent.py) | Tool schemas, system prompt, tool-dispatch loop (max 5 steps). |
 | [`memory.py`](assistant/memory.py) | Conversation history and facts persisted to disk. |
 | [`google_calendar.py`](assistant/google_calendar.py) | Downloads and caches the secret iCal address. |
+| [`google_api.py`](assistant/google_api.py) | OAuth sign-in, token storage and revocation, Google JSON → event dictionaries, and the create / update / delete tools. |
 | [`llm.py`](assistant/llm.py) | Claude API wrapper with an offline fallback model. |
 | [`config.py`](config.py) | Settings resolved from the environment, including the injected clock. |
 
 ### Tools exposed to the model
 
+Reading:
+
 | Tool | Parameters | Returns |
 |---|---|---|
-| `find_events` | `when`, optional `person` | Events in a date range, optionally filtered by attendee |
+| `find_events` | `when`, optional `person`, `contains` | Events in a date range, optionally filtered by attendee or title |
 | `find_free_time` | `when`, `duration_minutes` | Gaps in working hours long enough for the requested duration |
 | `upcoming_birthdays` | `within_days` | Birthdays in the window, sorted by proximity |
 | `search_notes` | `query` | Highest-ranked note chunks with their source filenames |
 | `remember_fact` | `fact` | Confirmation; the fact is appended to every later system prompt |
 
+Writing — each requires `--source api` and a signed-in account:
+
+| Tool | Parameters | Returns |
+|---|---|---|
+| `create_event` | `summary`, `when`, optional `start_time`, `duration_minutes`, `location`, `description`, `confirm` | The event it would create, or the created event |
+| `update_event` | `summary`, `when`, optional `new_when`, `new_start_time`, `new_duration_minutes`, `new_summary`, `new_location`, `confirm` | The event before and after, or the applied change |
+| `delete_event` | `summary`, `when`, optional `confirm` | The event it would remove, or confirmation that it is gone |
+
+The writing tools share one contract, defined once in `agent.TWO_PHASE` and
+interpolated into all three descriptions. The first call resolves the request
+and changes nothing; the second, carrying `confirm`, performs it. Three
+hand-written copies of that instruction drifted in practice — only
+`delete_event` picked up an extra confirmation from the model — which is why it
+now has a single definition.
+
 Tool errors are returned to the model as text rather than raised. An
 unrecognised date phrase produces the list of supported phrases, which the model
-reads before retrying.
+reads before retrying. The same channel carries refusals: an ambiguous target,
+a multi-day range where a single day is needed, or a repeating event.
+
+When a question asks for a number of events and the range searched holds fewer,
+the model widens it — 30 days, then 90, then a year — rather than asking
+permission to look further.
 
 ### Supported date phrases
 
@@ -145,15 +187,26 @@ cp .env.example .env
 |---|---|---|
 | `ANTHROPIC_API_KEY` | unset | Enables the real model. Without it, the offline fallback is used. |
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` | Model identifier |
+| `ANTHROPIC_EFFORT` | `low` | How hard the model thinks. The main cost lever — thinking bills as output tokens. Raise to `medium` or `high` if answers miss the point. |
 | `GOOGLE_ICS_URL` | unset | Secret iCal address, required for `--source url` |
 | `CALENDAR_FILE` | `data/sample_calendar.ics` | Local calendar for `--source file` |
 | `CALENDAR_NOW` | pinned to 2026-08-03 09:00 | Set to `now` to use the system clock |
+| `CALENDAR_TIMEZONE` | `America/New_York` | The single zone the assistant assumes. A zone name, never an offset — `EST` would be wrong from March to November. |
 | `NOTES_FOLDER` | `data/sample_notes` | Directory of `.md` files to index |
+| `FACTS_FILE` | `data/facts.json` | Where `remember_fact` persists what it is told |
+| `CACHED_ICS_FILE` | `data/google_cache.ics` | Where the `cache` command writes its copy |
 | `WORK_START_HOUR` | `9` | Lower bound for free-time search |
 | `WORK_END_HOUR` | `17` | Upper bound for free-time search |
+| `CREDENTIALS_FILE` | `credentials.json` | OAuth client downloaded from the Google Cloud console |
+| `TOKEN_FILE` | `token.json` | Where the token is written after signing in |
+| `REVOKE_ON_EXIT` | `1` | Revoke and delete the token when a signed-in session ends. Set to `0` to stay signed in between runs. |
+| `AUTH_TIMEOUT_SECONDS` | `120` | How long to wait for the browser during sign-in before giving up |
 
 `CALENDAR_NOW` defaults to a fixed date because the bundled sample calendar is
 built around 3 August 2026. Set it to `now` when using a real calendar.
+
+`CALENDAR_TIMEZONE` is the one place a zone is named. Everything internal is
+naive wall-clock time; this setting is what the edges convert against.
 
 The secret iCal address is obtained from Google Calendar under Settings → the
 calendar → Integrate calendar → **Secret address in iCal format**.
@@ -161,6 +214,48 @@ calendar → Integrate calendar → **Secret address in iCal format**.
 > **The iCal URL is a credential.** It grants permanent read access to the
 > entire calendar without authentication and does not expire until reset. It
 > belongs in `.env`, which is git-ignored.
+
+### Signing in
+
+Reading a calendar over `--source api`, and every tool that writes, needs an
+OAuth client. In the [Google Cloud console](https://console.cloud.google.com):
+
+1. Create or select a project, and stay in it for every step below.
+2. Enable the **Google Calendar API**. Do this first — the scope in step 4 does
+   not appear in the picker until the API it belongs to is enabled.
+3. **Google Auth Platform** → *Get Started*. Audience **External** (Internal
+   exists only for Workspace organisations). Add your own address as a **test
+   user**.
+4. **Data Access** → *Add or remove scopes* → `.../auth/calendar.events`.
+5. **Credentials** → *Create credentials* → **OAuth client ID** → type
+   **Desktop app** → download the JSON as `credentials.json` in the project
+   root.
+
+A correct file begins with `{"installed":`. One beginning `{"web":` is a Web
+application client and will not work: the sign-in runs a throwaway local server
+and catches the redirect on `localhost`, which is what a Desktop client permits.
+
+```bash
+python -m assistant.main login
+```
+
+The browser opens once. The **"Google hasn't verified this app"** warning is
+expected while the consent screen is in Testing — choose *Advanced*, then
+continue. Choosing *Back to safety* leaves without answering, which the sign-in
+detects by timeout rather than waiting forever.
+
+`login` prints which account it signed in as, warns if that calendar's timezone
+differs from `CALENDAR_TIMEZONE`, lists a few events as proof the token works,
+and then opens the chat session against `--source api`.
+
+> **`token.json` is a credential, not a cache.** Anything holding it can read
+> and edit the calendar it was granted. It is git-ignored, and by default it is
+> revoked with Google and deleted when the session ends — so every run asks for
+> consent again. Set `REVOKE_ON_EXIT=0` to keep it between runs.
+
+While the consent screen is in Testing, Google expires refresh tokens after
+seven days. With the default `REVOKE_ON_EXIT=1` this is invisible, since no
+token outlives its session.
 
 ### macOS certificate configuration
 
@@ -174,7 +269,7 @@ Python distributions from python.org install no root certificates, causing
 ## Usage
 
 ```bash
-python -m assistant.main [command] [--source file|url]
+python -m assistant.main [command] [--source file|url|api]
 ```
 
 | Command | Behaviour | Model required |
@@ -183,7 +278,7 @@ python -m assistant.main [command] [--source file|url]
 | `agenda "<phrase>"` | Prints events in a date range | No |
 | `birthdays` | Prints upcoming birthdays | No |
 | `cache` | Downloads `GOOGLE_ICS_URL` to `data/google_cache.ics` | No |
-| `login` | Signs in with Google via the browser, writes `token.json`, lists a few events | No |
+| `login` | Signs in with Google, reports the account, then opens the chat against `--source api` | Yes |
 
 Verify the calendar loads before starting a chat session:
 
@@ -208,6 +303,25 @@ Q> quit
 
 Questions are prompted with `Q>` and answers prefixed with `A>`. Each turn
 prints the selected tool and its arguments before the answer.
+
+Changing the calendar takes two turns, and the first one writes nothing:
+
+```
+Q> add lunch with Priya tomorrow at 12:00
+   (used create_event with {'summary': 'Lunch with Priya', 'when': 'tomorrow', 'start_time': '12:00'})
+
+A> I'd add:
+     Wed 12 Aug  12:00-13:00  Lunch with Priya
+   Shall I go ahead?
+
+Q> yes
+   (used create_event with {..., 'confirm': True})
+
+A> Done.
+```
+
+What you approve is rendered by the same formatter that prints every other
+event, so the line you agree to is the line you will read back later.
 
 To avoid re-downloading the calendar on every start, cache it and read the
 cached file:
@@ -247,6 +361,37 @@ offsets Google sends. Trade-off: a `TZID` naming a different zone is taken at
 face value, and `RRULE` `UNTIL` values written in UTC are still read as local,
 which can carry a series a few hours past its intended end.
 
+**Every write is confirmed, in two calls rather than a prompt.**
+A writing tool called without `confirm` resolves the request and describes it
+without touching the calendar; a second call performs it. Rationale: a tool
+returns a string to the model and does not own the terminal, so blocking on
+input would break both the "modules return, main prints" convention and any
+future HTTP transport. Confirming from the *resolved* event also beats
+confirming from the request, which is what the model would otherwise paraphrase.
+Trade-off: two round trips for every change.
+
+**Changes are patched, never re-created.**
+`update_event` sends only the fields that differ. Rationale: deleting and
+re-creating mints a new event id, emails a cancellation followed by a fresh
+invitation so every RSVP is lost, drops the meeting link and every other field
+this project does not model, and is not atomic — a dropped connection midway
+destroys the event rather than leaving it unchanged. Trade-off: none worth
+naming; the patch body is also less code than a rebuild.
+
+**A write is read back from its own response.**
+Google returns the event as it now exists, and that response, not the request,
+is converted and spliced into the live occurrence list. Rationale: an assistant
+that cannot see what it just did is worse than one that cannot write, and the
+stored event may differ from the one requested. Trade-off: the occurrence list
+is mutated in place, so the tool depends on receiving the session's actual list.
+
+**Ambiguity is refused, not guessed.**
+`update_event` and `delete_event` resolve a target from a title and a day
+through one shared function, and stop when that names anything other than
+exactly one event. Rationale: guessing wrong destroys something, and a request
+matching three events carries no information about which. Trade-off: naming an
+event twice is occasionally tedious.
+
 **Ranges are half-open and matched by overlap.**
 Every window is `[start, end)`, and an occurrence qualifies if it overlaps the
 window rather than being contained by it. Rationale: inclusive bounds place a
@@ -268,9 +413,17 @@ for 3 August 2026.
 
 ## Limitations
 
-**Read-only.** Events cannot be created, modified, or deleted. The iCal export
-is a read-only feed; writing would require the Google Calendar API with an
-authenticated write scope.
+**Repeating events cannot be changed or deleted.** Google acts on the rule, not
+the occurrence, so removing "Monday's standup" would remove every standup there
+will ever be. Both writing tools refuse a target carrying an `RRULE` rather than
+act on the whole series. Telling one instance apart from its series is the
+remaining piece of work, and it is the same problem as the `RECURRENCE-ID`
+limitation below.
+
+**Writing is not pinned to the source being read.** The writing tools always act
+on the signed-in account's primary calendar, whatever `--source` is set to — so
+a session reading the bundled sample calendar can still create a real event.
+`login` prints the account it signed in as for exactly this reason.
 
 **Google's Birthdays calendar is unavailable.** It is generated from Contacts
 rather than stored in a calendar, and appears in no calendar export. Birthdays
@@ -301,11 +454,13 @@ is regular-expression matching and the response is raw tool output.
 
 Ordered roughly by how much new machinery each one drags in.
 
-- **Create events.** A `create_event` tool, with an explicit confirmation turn:
-  the assistant restates the event it is about to write and only calls the API
-  after the user agrees. Create only — no edit or delete, so a misread request
-  cannot destroy anything. Requires the Google Calendar API with an
-  authenticated write scope; the iCal feed this project reads is read-only.
+- **Editing one occurrence of a repeating event.** Both writing tools currently
+  refuse anything with an `RRULE`. Supporting it means identifying an event as
+  `(uid, original start)` rather than by uid alone, and choosing between this
+  occurrence, the whole series, and this-and-following. It also means revisiting
+  the converter: `_to_event` deliberately skips the records Google writes for a
+  moved occurrence, so an edit made this way would currently be ignored on the
+  next load. One function, `_resolve_one`, is where the refusal lives.
 
 - **Proactive travel help.** When an event carries a location, offer to look up
   how to get there — "you're in New York at 14:00, want train times?" — backed

@@ -33,7 +33,7 @@ from googleapiclient.errors import HttpError
 from oauthlib.oauth2.rfc6749.errors import AccessDeniedError
 
 import config
-from assistant import ics_parser
+from assistant import ics_parser, queries, recurrence
 
 
 class AuthError(Exception):
@@ -147,6 +147,28 @@ def _sign_in():
         raise AuthError(
             f"The browser sign-in did not finish: "
             f"{type(error).__name__}: {error}") from error
+
+
+def signed_in_account():
+    """Which calendar this token actually writes to.
+
+    Worth showing rather than assuming. The account is chosen in a browser,
+    away from the terminal, and every writing tool acts on "primary" - so a
+    session pointed at the wrong calendar looks exactly like one pointed at the
+    right calendar until something lands in it.
+
+    Read from the envelope of an events listing rather than from
+    `calendars().get()`, which needs a broader scope than `calendar.events` and
+    is refused with "insufficient authentication scopes". A primary calendar's
+    `summary` is the account's address, which is exactly the thing worth
+    printing - and it costs no extra permission.
+    """
+    try:
+        listing = get_service().events().list(
+            calendarId="primary", maxResults=1).execute()
+    except HttpError as error:
+        raise AuthError(_explain_http_error(error)) from error
+    return listing.get("summary", "unknown"), listing.get("timeZone", "")
 
 
 def _naive(stamp):
@@ -268,6 +290,296 @@ def load_from_api(horizon_days=400):
         page_token = response.get("nextPageToken")
         if not page_token:
             return events
+
+
+def _parse_clock(text):
+    """Turn "14:30" into (14, 30). Raises with advice the model can act on."""
+    parts = str(text).strip().split(":")
+    if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
+        raise ValueError(
+            f"I do not understand the time {text!r}. Use 24-hour HH:MM, "
+            "such as '09:00' or '14:30'.")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour < 24 and 0 <= minute < 60):
+        raise ValueError(f"{text!r} is not a real time of day.")
+    return hour, minute
+
+
+def create_event(occurrences, summary, when, start_time=None,
+                 duration_minutes=60, location="", description="",
+                 confirm=False):
+    """Add an event to the calendar, in two calls.
+
+    Called without `confirm` this writes nothing: it resolves the phrase, works
+    out the exact times, and hands back a description for the user to approve.
+    Called again with `confirm=True` it performs the insert. Splitting it this
+    way is what keeps a misheard request from silently landing on a real
+    calendar - and it works over any transport, unlike a tool that tries to
+    prompt on stdin.
+
+    The model supplies the phrase and the clock time separately and resolves
+    neither. `parse_when` decides what "thursday" means, exactly as it does for
+    reading, so the rule that the model never does date arithmetic survives
+    contact with writing.
+
+    `occurrences` is the live list the session is answering from. A created
+    event is added to it here, because an assistant that cannot see what it
+    just did is worse than one that cannot write at all.
+    """
+    day_start, day_end = queries.parse_when(when, config.NOW)
+
+    # "next week" resolves fine and means nothing here: it is seven candidate
+    # days, and guessing one is exactly the failure this project avoids.
+    if day_end - day_start > timedelta(days=1):
+        return (f"{when!r} covers more than one day, so I cannot tell which "
+                "day you mean. Give a single day - 'tomorrow', 'thursday', or "
+                "a date like '2026-08-15'.")
+
+    event = ics_parser.new_event()
+    event["summary"] = summary
+    event["location"] = location
+    event["description"] = description
+    event["all_day"] = start_time is None
+
+    if event["all_day"]:
+        event["start"] = day_start
+        event["end"] = day_start + timedelta(days=1)
+    else:
+        hour, minute = _parse_clock(start_time)
+        event["start"] = day_start.replace(hour=hour, minute=minute)
+        event["end"] = event["start"] + timedelta(minutes=duration_minutes)
+
+    # Phase one. Rendered with the same formatter every other event goes
+    # through, so what is approved looks like what will later be read back.
+    if not confirm:
+        return ("About to create:\n\n"
+                f"  {queries.format_event(event)}\n\n"
+                "Nothing has been created yet. Show this to the user and ask "
+                "them to confirm. If they agree, call create_event again with "
+                "the same arguments and confirm=true.")
+
+    zone = str(config.TIMEZONE)
+    if event["all_day"]:
+        # All-day events are dates, and the end is the day after - the same
+        # half-open convention the .ics format uses.
+        when_fields = {
+            "start": {"date": event["start"].date().isoformat()},
+            "end": {"date": event["end"].date().isoformat()},
+        }
+    else:
+        # Naive timestamps plus an explicit zone: Google resolves them, so no
+        # offset arithmetic happens here.
+        when_fields = {
+            "start": {"dateTime": event["start"].isoformat(), "timeZone": zone},
+            "end": {"dateTime": event["end"].isoformat(), "timeZone": zone},
+        }
+
+    body = {"summary": summary, **when_fields}
+    if location:
+        body["location"] = location
+    if description:
+        body["description"] = description
+
+    try:
+        created = get_service().events().insert(
+            calendarId="primary", body=body).execute()
+    except HttpError as error:
+        raise AuthError(_explain_http_error(error)) from error
+
+    # Read back from what Google returned rather than from what was sent. The
+    # response is the event as it now exists, which is the only version worth
+    # trusting - it may differ from the request.
+    stored = _to_event(created)
+    if stored is not None:
+        window = timedelta(days=365)
+        occurrences.extend(recurrence.expand_event(
+            stored, config.NOW - window, config.NOW + window))
+        occurrences.sort(key=lambda occurrence: occurrence["start"])
+
+    return f"Created:\n\n  {queries.format_event(stored or event)}"
+
+
+def _resolve_one(occurrences, summary, when, verb):
+    """Find the single event a title and a day refer to.
+
+    Returns `(occurrence, None)` on a clean hit, or `(None, message)` when the
+    request does not name exactly one thing. Both writing tools need this and
+    both must refuse rather than guess: picking the wrong event destroys
+    something either way.
+
+    `verb` only shapes the wording ("deleted nothing", "changed nothing").
+    """
+    start, end = queries.parse_when(when, config.NOW)
+    wanted = summary.strip().lower()
+
+    # Overlap, not containment - the same rule the rest of the project matches
+    # events with.
+    matches = [
+        occurrence for occurrence in occurrences
+        if occurrence["start"] < end and occurrence["end"] > start
+        and wanted in occurrence["summary"].lower()
+    ]
+
+    if not matches:
+        return None, (f"No event matching {summary!r} in {when!r}. Try "
+                      "find_events first to see what is actually there.")
+
+    if len(matches) > 1:
+        listed = "\n".join(f"  {queries.format_event(m)}" for m in matches)
+        return None, (f"{len(matches)} events match {summary!r} in {when!r}, "
+                      f"so I have {verb} nothing:\n\n{listed}\n\n"
+                      "Ask the user which one they mean, then use a more "
+                      "specific title or a single date.")
+
+    target = matches[0]
+    if target["rrule"]:
+        return None, (f"{target['summary']!r} repeats. Acting on it would "
+                      "affect the entire series rather than this one "
+                      f"occurrence, so I have {verb} nothing. Changing a "
+                      "single occurrence of a repeating event is not "
+                      "supported yet.")
+
+    return target, None
+
+
+def delete_event(occurrences, summary, when, confirm=False):
+    """Remove an event from the calendar, in two calls like `create_event`."""
+    target, problem = _resolve_one(occurrences, summary, when, "deleted")
+    if problem:
+        return problem
+
+    if not confirm:
+        return ("About to delete:\n\n"
+                f"  {queries.format_event(target)}\n\n"
+                "This cannot be undone. Nothing has been deleted yet. Show "
+                "this to the user, and only if they agree, call delete_event "
+                "again with the same arguments and confirm=true.")
+
+    try:
+        get_service().events().delete(
+            calendarId="primary", eventId=target["uid"]).execute()
+    except HttpError as error:
+        if getattr(error.resp, "status", None) in (404, 410):
+            # Already gone. Drop it locally so the session stops offering it.
+            occurrences[:] = [o for o in occurrences
+                              if o["uid"] != target["uid"]]
+            return (f"{target['summary']!r} was already gone from the "
+                    "calendar. Removed it from this session.")
+        raise AuthError(_explain_http_error(error)) from error
+
+    occurrences[:] = [o for o in occurrences if o["uid"] != target["uid"]]
+    return f"Deleted:\n\n  {queries.format_event(target)}"
+
+
+def update_event(occurrences, summary, when, new_when=None, new_start_time=None,
+                 new_duration_minutes=None, new_summary=None,
+                 new_location=None, confirm=False):
+    """Change an existing event, sending only the fields that differ.
+
+    Uses Google's `patch`, which leaves everything it is not told about alone.
+    The obvious alternative - delete the old event and create a replacement -
+    looks equivalent and is not: it mints a new id, emails a cancellation
+    followed by a fresh invitation so every RSVP is lost, drops the meeting
+    link and every other field this project does not model, and is not atomic.
+    A dropped connection halfway through would destroy the event rather than
+    leave it unchanged.
+
+    Anything not named keeps its current value, so "move it to Friday" holds
+    the time and "make it 3pm" holds the day.
+    """
+    target, problem = _resolve_one(occurrences, summary, when, "changed")
+    if problem:
+        return problem
+
+    nothing_asked = all(field is None for field in (
+        new_when, new_start_time, new_duration_minutes, new_summary,
+        new_location))
+    if nothing_asked:
+        return ("Nothing to change. Say what should be different - a new day, "
+                "a new time, a new length, a new title, or a new location.")
+
+    # Start from what the event is now, then apply only what was asked for.
+    moved = dict(target)
+
+    if new_summary is not None:
+        moved["summary"] = new_summary
+    if new_location is not None:
+        moved["location"] = new_location
+
+    day = target["start"].date()
+    if new_when is not None:
+        day_start, day_end = queries.parse_when(new_when, config.NOW)
+        if day_end - day_start > timedelta(days=1):
+            return (f"{new_when!r} covers more than one day, so I cannot tell "
+                    "which day you mean. Give a single day.")
+        day = day_start.date()
+
+    length = target["end"] - target["start"]
+    if new_duration_minutes is not None:
+        length = timedelta(minutes=new_duration_minutes)
+
+    if new_start_time is not None:
+        hour, minute = _parse_clock(new_start_time)
+        moved["all_day"] = False
+        moved["start"] = datetime(day.year, day.month, day.day, hour, minute)
+        moved["end"] = moved["start"] + length
+    elif target["all_day"]:
+        moved["start"] = datetime(day.year, day.month, day.day)
+        moved["end"] = moved["start"] + max(length, timedelta(days=1))
+    else:
+        moved["start"] = target["start"].replace(
+            year=day.year, month=day.month, day=day.day)
+        moved["end"] = moved["start"] + length
+
+    if not confirm:
+        return ("About to change:\n\n"
+                f"  from  {queries.format_event(target)}\n"
+                f"    to  {queries.format_event(moved)}\n\n"
+                "Nothing has been changed yet. Show this to the user and only "
+                "if they agree, call update_event again with the same "
+                "arguments and confirm=true.")
+
+    # Only what actually differs. Everything unmentioned - the meeting link,
+    # reminders, guest permissions, colour - survives untouched.
+    body = {}
+    if moved["summary"] != target["summary"]:
+        body["summary"] = moved["summary"]
+    if moved["location"] != target["location"]:
+        body["location"] = moved["location"]
+
+    if (moved["start"], moved["end"], moved["all_day"]) != (
+            target["start"], target["end"], target["all_day"]):
+        zone = str(config.TIMEZONE)
+        if moved["all_day"]:
+            body["start"] = {"date": moved["start"].date().isoformat()}
+            body["end"] = {"date": moved["end"].date().isoformat()}
+        else:
+            body["start"] = {"dateTime": moved["start"].isoformat(),
+                             "timeZone": zone}
+            body["end"] = {"dateTime": moved["end"].isoformat(),
+                           "timeZone": zone}
+
+    if not body:
+        return "That is already how the event looks. Nothing to change."
+
+    try:
+        patched = get_service().events().patch(
+            calendarId="primary", eventId=target["uid"], body=body).execute()
+    except HttpError as error:
+        raise AuthError(_explain_http_error(error)) from error
+
+    # Replace the old occurrences with whatever Google says the event is now.
+    stored = _to_event(patched)
+    occurrences[:] = [o for o in occurrences if o["uid"] != target["uid"]]
+    if stored is not None:
+        window = timedelta(days=365)
+        occurrences.extend(recurrence.expand_event(
+            stored, config.NOW - window, config.NOW + window))
+        occurrences.sort(key=lambda occurrence: occurrence["start"])
+
+    return ("Changed:\n\n"
+            f"  from  {queries.format_event(target)}\n"
+            f"    to  {queries.format_event(stored or moved)}")
 
 
 def sign_out():
