@@ -8,10 +8,23 @@ venv/
 
 # Local data - never commit a real calendar or exported notes
 data/facts.json
+# One file per user once more than one person is served. Whatever anyone told
+# the assistant to remember about themselves lives here.
+data/facts/
 data/*.ics
 !data/sample_calendar.ics
 credentials.json
 token.json
+
+# OAuth client downloads. Every one of these carries a client secret, and the
+# name varies with how it was saved - Google's own default is
+# client_secret_<id>.apps.googleusercontent.com.json - so match the shapes
+# rather than one filename.
+OAuthCrediential.json
+OAuthCredential*.json
+OAuthCredentials*.json
+client_secret*.json
+*client_secret*.json
 
 # Test suite - kept local, not published
 tests/

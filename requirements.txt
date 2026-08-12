@@ -4,3 +4,4 @@ python-dotenv>=1.0       # loads .env so secrets stay out of the source
 
 google-auth-oauthlib>=1.2        # OAuth browser flow, for the authorized API path
 google-api-python-client>=2.100  # Google Calendar API client
+flask>=3.0                       # the HTTP interface (assistant/web.py)

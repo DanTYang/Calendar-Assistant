@@ -11,6 +11,7 @@ conversation was sent again. Memory is something the program builds:
               ("remember that Priya is my manager")
 """
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -125,3 +126,43 @@ def facts_for_prompt(path=None):
     if not facts:
         return ""
     return "\n".join([FACTS_HEADER] + [f"- {fact}" for fact in facts])
+
+def facts_file_for(user_id=None):
+    """Where one person's saved facts live.
+
+    A user id arrives from outside - eventually from whatever service owns
+    signing in - so it never becomes a path component directly. "../../../etc"
+    is an ordinary-looking string and an effective one. Hashing turns any input
+    into a fixed-length name that cannot escape the directory, whatever it
+    contains.
+
+    `None` keeps the single shared file the terminal has always used.
+    """
+    if user_id is None:
+        return Path(config.FACTS_FILE)
+    digest = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()[:32]
+    return Path(config.FACTS_FILE).parent / "facts" / f"{digest}.json"
+
+
+class UserMemory:
+    """Everything remembered for one person: this conversation, and the facts
+    that outlive it.
+
+    Passing one of these rather than a bare `Conversation` is what lets a
+    single process answer for more than one person. Before it, the conversation
+    was per-process and the facts file was a constant, so a second user joined
+    the first one's conversation partway through and read their notes.
+
+    A `user_id` of None means the single-user terminal, which is unchanged.
+    """
+
+    def __init__(self, user_id=None, max_turns=10):
+        self.user_id = user_id
+        self.conversation = Conversation(max_turns)
+        self.facts_file = facts_file_for(user_id)
+
+    def facts_for_prompt(self):
+        return facts_for_prompt(self.facts_file)
+
+    def save_fact(self, fact):
+        return save_fact(fact, self.facts_file)

@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calendar Assistant</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #fff; --ink: #1c1c1a; --muted: #6b6b66;
+    --line: #e4e4df; --mine: #eceae4; --accent: #3d6b52;
+    /* Text that sits on the accent. It has to flip with the theme: the accent
+       is dark in this one and light in the other, so a fixed white would be
+       unreadable on one of them. */
+    --on-accent: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #191918; --panel: #212120; --ink: #eceae6; --muted: #96968f;
+      --line: #33332f; --mine: #2b2b28; --accent: #7fb094;
+      --on-accent: #16231c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: .7rem 1rem; border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+  }
+  header strong { font-weight: 600; }
+  header span { color: var(--muted); font-size: .82rem; }
+  #log { flex: 1; overflow-y: auto; padding: 1rem; }
+  .turn { max-width: 46rem; margin: 0 auto .9rem; }
+  .bubble {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: .7rem; padding: .6rem .85rem; white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .me .bubble { background: var(--mine); margin-left: auto; max-width: 80%; }
+  .me { display: flex; }
+  /* Only the assistant is named. Your own messages are already obviously
+     yours - right-aligned, differently coloured, and you just typed them -
+     so a label there says nothing the layout has not already said. */
+  .sender {
+    font-size: .84rem; font-weight: 600; letter-spacing: .02em;
+    color: var(--muted); margin-bottom: .3rem;
+  }
+
+  /* Three dots that rise in turn. A still "..." is indistinguishable from a
+     page that has quietly stopped working - the movement is the message. */
+  .thinking { display: inline-flex; gap: .28rem; padding: .15rem 0; }
+  .thinking i {
+    width: .42rem; height: .42rem; border-radius: 50%;
+    background: var(--muted); display: block;
+    animation: bounce 1.25s infinite ease-in-out both;
+  }
+  .thinking i:nth-child(2) { animation-delay: .16s; }
+  .thinking i:nth-child(3) { animation-delay: .32s; }
+  @keyframes bounce {
+    0%, 70%, 100% { transform: translateY(0);     opacity: .35; }
+    35%           { transform: translateY(-.34rem); opacity: 1; }
+  }
+  /* Someone who has asked for less movement still needs to see it is working,
+     so the dots fade rather than stopping altogether. */
+  @media (prefers-reduced-motion: reduce) {
+    .thinking i { animation: fade 1.6s infinite ease-in-out both; }
+    @keyframes fade { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
+  }
+
+  .tools {
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--muted); margin-bottom: .3rem;
+  }
+  .err .bubble { border-color: #b3543f; color: #b3543f; }
+  .bubble ul, .bubble ol { margin: .35rem 0; padding-left: 1.3rem; }
+  .bubble li { margin: .12rem 0; }
+  .bubble code {
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--mine); padding: .05rem .3rem; border-radius: .25rem;
+  }
+  .bubble a { color: var(--accent); overflow-wrap: anywhere; }
+  .confirm { display: flex; gap: .5rem; margin-top: .6rem; }
+  .confirm button { padding: .4rem .9rem; font-size: .88rem; }
+  /* Readable, but plainly the secondary of the two: full-strength text on a
+     quiet background, rather than dim text that is hard to read at all. */
+  .confirm .no {
+    background: var(--bg); color: var(--ink);
+    border: 1px solid var(--line); font-weight: 500;
+  }
+  .confirm .no:hover { border-color: var(--muted); }
+  form {
+    display: flex; gap: .5rem; padding: .75rem 1rem;
+    border-top: 1px solid var(--line); background: var(--panel);
+  }
+  input {
+    flex: 1; padding: .6rem .75rem; border-radius: .55rem;
+    border: 1px solid var(--line); background: var(--bg); color: inherit; font: inherit;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button {
+    padding: .6rem 1.1rem; border: 0; border-radius: .55rem;
+    background: var(--accent); color: var(--on-accent);
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button[disabled] { opacity: .5; cursor: default; }
+  #signout {
+    background: none; color: var(--muted); border: 1px solid var(--line);
+    padding: .2rem .6rem; font-size: .8rem; font-weight: 500; margin-left: .6rem;
+  }
+  #signout:hover { color: var(--ink); }
+</style>
+</head>
+<body>
+  <header>
+    <strong>Calendar Assistant</strong>
+    <span>
+      <span id="who">…</span>
+      <button id="signout" type="button" hidden>Sign out</button>
+    </span>
+  </header>
+
+  <div id="log">
+    <div class="turn">
+      <div class="bubble">Ask about your calendar — what's on next week, when you're
+free for an hour, how to get somewhere. To add, move, or cancel something, say so:
+you'll be shown exactly what will happen before anything changes.</div>
+    </div>
+  </div>
+
+  <form id="composer">
+    <input id="message" placeholder="Ask something…" autocomplete="off" autofocus>
+    <button id="send">Send</button>
+  </form>
+
+<script>
+const log = document.getElementById('log');
+const form = document.getElementById('composer');
+const input = document.getElementById('message');
+const send = document.getElementById('send');
+
+// Fetched once. Asking for it is also what causes the cookie to be written,
+// since the token is created lazily.
+let csrf = null;
+
+const ASSISTANT = 'Calendar Assistant';
+
+/* Rendering the assistant's answers.
+ *
+ * The model writes markdown - bold titles, bulleted days, the occasional Maps
+ * link - and showing it raw means reading asterisks and copying URLs by hand.
+ *
+ * Everything below builds DOM nodes and sets textContent. Nothing is ever
+ * assigned to innerHTML, and that is not stylistic caution: the text passing
+ * through here contains event titles, which come from a calendar that may hold
+ * events other people created. An event called
+ * "<img src=x onerror=alert(1)>" is a perfectly legal calendar entry, and
+ * innerHTML would run it.
+ */
+
+const INLINE = /(\*\*[^*]+\*\*|`[^`]+`|https?:\/\/[^\s<>()]+)/g;
+
+function inlineInto(parent, text) {
+  let last = 0, match;
+  INLINE.lastIndex = 0;
+  while ((match = INLINE.exec(text)) !== null) {
+    if (match.index > last) {
+      parent.appendChild(document.createTextNode(text.slice(last, match.index)));
+    }
+    const token = match[0];
+    let node;
+    if (token.startsWith('**')) {
+      node = document.createElement('strong');
+      node.textContent = token.slice(2, -2);
+    } else if (token.startsWith('`')) {
+      node = document.createElement('code');
+      node.textContent = token.slice(1, -1);
+    } else {
+      node = document.createElement('a');
+      // href is set from a match that had to begin http:// or https://, so a
+      // javascript: URL cannot reach this line.
+      node.href = token;
+      node.target = '_blank';
+      node.rel = 'noopener noreferrer';
+      node.textContent = token.length > 48 ? token.slice(0, 45) + '\u2026' : token;
+    }
+    parent.appendChild(node);
+    last = match.index + token.length;
+  }
+  if (last < text.length) {
+    parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+}
+
+function renderAnswer(text, into) {
+  into.textContent = '';
+  let list = null;
+
+  for (const line of String(text).split('\n')) {
+    const bullet = line.match(/^\s*[-*\u2022]\s+(.*)$/);
+    const numbered = line.match(/^\s*(\d+)[.)]\s+(.*)$/);
+
+    if (bullet || numbered) {
+      const wanted = bullet ? 'UL' : 'OL';
+      if (!list || list.tagName !== wanted) {
+        list = document.createElement(wanted.toLowerCase());
+        into.appendChild(list);
+      }
+      const item = document.createElement('li');
+      inlineInto(item, bullet ? bullet[1] : numbered[2]);
+      list.appendChild(item);
+      continue;
+    }
+
+    list = null;
+    if (!line.trim()) {
+      into.appendChild(document.createElement('br'));
+      continue;
+    }
+    const paragraph = document.createElement('div');
+    inlineInto(paragraph, line);
+    into.appendChild(paragraph);
+  }
+}
+
+function bubble(text, kind, sender) {
+  const turn = document.createElement('div');
+  turn.className = 'turn' + (kind ? ' ' + kind : '');
+
+  if (sender) {
+    const label = document.createElement('div');
+    label.className = 'sender';
+    label.textContent = sender;
+    turn.appendChild(label);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'bubble';
+  if (text === null) {
+    // Left empty so the caller can put the answer here once it arrives,
+    // replacing the dots in place rather than removing and re-adding a turn.
+    const dots = document.createElement('span');
+    dots.className = 'thinking';
+    dots.setAttribute('role', 'status');
+    dots.setAttribute('aria-label', 'Thinking');
+    dots.innerHTML = '<i></i><i></i><i></i>';
+    body.appendChild(dots);
+  } else {
+    body.textContent = text;
+  }
+
+  turn.appendChild(body);
+  log.appendChild(turn);
+  log.scrollTop = log.scrollHeight;
+  return turn;
+}
+
+// The same trace the terminal prints. Worth showing rather than hiding: when
+// something changed the calendar, which tool ran is the interesting part.
+function toolTrace(tools, turn) {
+  if (!tools || !tools.length) return;
+  const line = document.createElement('div');
+  line.className = 'tools';
+  line.textContent = tools
+    .map(t => t.tool + '(' + Object.keys(t.arguments || {}).join(', ') + ')')
+    .join('  ');
+  turn.prepend(line);
+}
+
+async function start() {
+  try {
+    const [token, me] = await Promise.all([
+      fetch('/csrf').then(r => r.json()),
+      fetch('/me').then(r => r.ok ? r.json() : null),
+    ]);
+    csrf = token;
+    document.getElementById('who').textContent = me ? me.email : 'not signed in';
+    document.getElementById('signout').hidden = !me;
+  } catch (e) {
+    document.getElementById('who').textContent = 'not signed in';
+  }
+}
+
+// Spring expects a POST, and the same CSRF token as any other write. A link
+// would be simpler and would let another site sign you out by embedding it.
+document.getElementById('signout').addEventListener('click', async () => {
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = '/logout';
+  const field = document.createElement('input');
+  field.type = 'hidden';
+  field.name = csrf.parameterName;
+  field.value = csrf.token;
+  form.appendChild(field);
+  document.body.appendChild(form);
+  form.submit();
+});
+
+/* Whether the assistant is waiting to be told to go ahead.
+ *
+ * Not decided by reading the answer for a question mark - the wording varies
+ * every time. A writing tool that ran WITHOUT confirm is the structural
+ * signal, and it means exactly one thing: the tool described what it would do
+ * and changed nothing. That is the same two-call contract the terminal uses,
+ * read from the trace rather than the prose.
+ */
+const WRITING_TOOLS = ['create_event', 'update_event', 'delete_event'];
+
+function awaitingConfirmation(tools) {
+  if (!tools || !tools.length) return false;
+  const last = tools[tools.length - 1];
+  return WRITING_TOOLS.includes(last.tool)
+      && !(last.arguments && last.arguments.confirm);
+}
+
+function offerConfirmation(turn) {
+  const row = document.createElement('div');
+  row.className = 'confirm';
+
+  const go = document.createElement('button');
+  go.textContent = 'Go ahead';
+  const stop = document.createElement('button');
+  stop.className = 'no';
+  stop.textContent = 'Cancel';
+
+  // Buttons send the same words you would have typed, so the assistant needs
+  // no separate path for a click - and typing still works.
+  for (const [button, reply] of [[go, 'yes'], [stop, 'no']]) {
+    button.addEventListener('click', () => {
+      row.remove();
+      submit(reply);
+    });
+  }
+
+  row.append(go, stop);
+  turn.querySelector('.bubble').appendChild(row);
+}
+
+form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const message = input.value.trim();
+  input.value = '';
+  submit(message);
+});
+
+async function submit(message) {
+  if (!message || !csrf) return;
+
+  bubble(message, 'me');
+  send.disabled = true;
+  const pending = bubble(null, null, ASSISTANT);
+
+  try {
+    const response = await fetch('/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
+      body: JSON.stringify({ message }),
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      // The session expired rather than anything going wrong with the answer.
+      pending.remove();
+      bubble('Your session has ended. Reload the page to sign in again.', 'err', ASSISTANT);
+      return;
+    }
+
+    const body = await response.json();
+    if (!response.ok) {
+      pending.remove();
+      bubble(body.error || ('Request failed (' + response.status + ')'), 'err', ASSISTANT);
+      return;
+    }
+
+    const tools = body.tools_used || body.toolsUsed;
+    renderAnswer(body.answer, pending.querySelector('.bubble'));
+    toolTrace(tools, pending);
+    if (awaitingConfirmation(tools)) offerConfirmation(pending);
+  } catch (e) {
+    pending.remove();
+    bubble('Could not reach the assistant. Is the gateway still running?', 'err', ASSISTANT);
+  } finally {
+    send.disabled = false;
+    input.focus();
+  }
+}
+
+start();
+</script>
+</body>
+</html>

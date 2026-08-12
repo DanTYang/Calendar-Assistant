@@ -149,7 +149,7 @@ def _sign_in():
             f"{type(error).__name__}: {error}") from error
 
 
-def signed_in_account():
+def signed_in_account(credentials=None):
     """Which calendar this token actually writes to.
 
     Worth showing rather than assuming. The account is chosen in a browser,
@@ -164,7 +164,7 @@ def signed_in_account():
     printing - and it costs no extra permission.
     """
     try:
-        listing = get_service().events().list(
+        listing = get_service(credentials).events().list(
             calendarId="primary", maxResults=1).execute()
     except HttpError as error:
         raise AuthError(_explain_http_error(error)) from error
@@ -253,7 +253,7 @@ def _convert(item):
     return ics_parser._finish(event)
 
 
-def load_from_api(horizon_days=400):
+def load_from_api(horizon_days=400, credentials=None):
     """Load events from the Calendar API as event dictionaries.
 
     The third source, beside a local file and the iCal feed, and the only one
@@ -265,7 +265,7 @@ def load_from_api(horizon_days=400):
     around `recurrence.py`, the one module here that understands RRULE. Its
     `recurrence` field is iCalendar text, so the rules survive the trip intact.
     """
-    service = get_service()
+    service = get_service(credentials)
     window = timedelta(days=horizon_days)
     params = {
         "calendarId": "primary",
@@ -364,7 +364,7 @@ def _parse_clock(text):
 
 def create_event(occurrences, summary, when, start_time=None,
                  duration_minutes=60, location="", description="",
-                 confirm=False):
+                 confirm=False, credentials=None):
     """Add an event to the calendar, in two calls.
 
     Called without `confirm` this writes nothing: it resolves the phrase, works
@@ -438,7 +438,7 @@ def create_event(occurrences, summary, when, start_time=None,
         body["description"] = description
 
     try:
-        created = get_service().events().insert(
+        created = get_service(credentials).events().insert(
             calendarId="primary", body=body).execute()
     except HttpError as error:
         raise AuthError(_explain_http_error(error)) from error
@@ -544,7 +544,7 @@ def _rrule_capped_before(rrule, boundary, remaining):
     return before, after
 
 
-def _instance_id(master_uid, start):
+def _instance_id(master_uid, start, credentials=None):
     """Google's own id for one occurrence of a series.
 
     Editing a single occurrence means addressing that occurrence, and Google
@@ -553,7 +553,7 @@ def _instance_id(master_uid, start):
     """
     window = timedelta(days=1)
     try:
-        result = get_service().events().instances(
+        result = get_service(credentials).events().instances(
             calendarId="primary", eventId=master_uid,
             timeMin=_rfc3339(start - window),
             timeMax=_rfc3339(start + window)).execute()
@@ -568,7 +568,8 @@ def _instance_id(master_uid, start):
     return None
 
 
-def delete_event(occurrences, summary, when, scope=None, confirm=False):
+def delete_event(occurrences, summary, when, scope=None, confirm=False,
+                 credentials=None):
     """Remove an event from the calendar, in two calls like `create_event`."""
     target, problem = _resolve_one(occurrences, summary, when, "deleted")
     if problem:
@@ -591,13 +592,13 @@ def delete_event(occurrences, summary, when, scope=None, confirm=False):
 
     event_id = target["uid"]
     if one_of_many:
-        event_id = _instance_id(target["uid"], target["start"])
+        event_id = _instance_id(target["uid"], target["start"], credentials)
         if event_id is None:
             return ("I could not find that occurrence on the calendar, so "
                     "nothing was deleted. It may already be gone.")
 
     try:
-        get_service().events().delete(
+        get_service(credentials).events().delete(
             calendarId="primary", eventId=event_id).execute()
     except HttpError as error:
         if getattr(error.resp, "status", None) in (404, 410):
@@ -617,7 +618,7 @@ def delete_event(occurrences, summary, when, scope=None, confirm=False):
     return f"Deleted:\n\n  {queries.format_event(target)}"
 
 
-def _split_series(occurrences, target, moved):
+def _split_series(occurrences, target, moved, credentials=None):
     """Cap a series at one occurrence and start a new one from there.
 
     Two writes, in the order that fails safely. The cap goes first: if the
@@ -631,7 +632,7 @@ def _split_series(occurrences, target, moved):
     before, after = _rrule_capped_before(
         target["rrule"], target["start"], remaining)
 
-    service = get_service()
+    service = get_service(credentials)
     try:
         service.events().patch(
             calendarId="primary", eventId=target["uid"],
@@ -681,7 +682,8 @@ def _split_series(occurrences, target, moved):
 
 def update_event(occurrences, summary, when, new_when=None, new_start_time=None,
                  new_duration_minutes=None, new_summary=None,
-                 new_location=None, scope=None, confirm=False):
+                 new_location=None, scope=None, confirm=False,
+                 credentials=None):
     """Change an existing event, sending only the fields that differ.
 
     Uses Google's `patch`, which leaves everything it is not told about alone.
@@ -781,17 +783,17 @@ def update_event(occurrences, summary, when, new_when=None, new_start_time=None,
         return "That is already how the event looks. Nothing to change."
 
     if splits_series:
-        return _split_series(occurrences, target, moved)
+        return _split_series(occurrences, target, moved, credentials)
 
     event_id = target["uid"]
     if one_of_many:
-        event_id = _instance_id(target["uid"], target["start"])
+        event_id = _instance_id(target["uid"], target["start"], credentials)
         if event_id is None:
             return ("I could not find that occurrence on the calendar, so "
                     "nothing was changed.")
 
     try:
-        patched = get_service().events().patch(
+        patched = get_service(credentials).events().patch(
             calendarId="primary", eventId=event_id, body=body).execute()
     except HttpError as error:
         raise AuthError(_explain_http_error(error)) from error
@@ -885,12 +887,32 @@ def _explain_http_error(error):
     return f"Google refused the request (HTTP {status}): {text}"
 
 
-def get_service():
-    """Build the Calendar API client, signing in first if necessary."""
-    return build("calendar", "v3", credentials=get_credentials())
+def credentials_from_token(access_token):
+    """Credentials from an access token somebody else obtained and refreshed.
+
+    This is how the service works for more than one person. A token arrives
+    with the request, is used for that request, and is gone - nothing is read
+    from disk and nothing is kept, so the process is not tied to one account.
+
+    No refresh token is included on purpose. Whoever supplies the access token
+    owns renewing it; a service that could renew its own would need somewhere
+    to keep the refresh token, which is the statelessness this avoids.
+    """
+    return Credentials(token=access_token, scopes=SCOPES)
 
 
-def list_upcoming(max_results=5):
+def get_service(credentials=None):
+    """Build the Calendar API client.
+
+    With `credentials`, uses them and touches no file - the multi-user path.
+    Without, falls back to the token on disk, signing in through a browser if
+    there is none, which is what the terminal has always done.
+    """
+    return build("calendar", "v3",
+                 credentials=credentials or get_credentials())
+
+
+def list_upcoming(max_results=5, credentials=None):
     """Return `(when, summary)` pairs for the next few events, soonest first.
 
     This exists to prove the authorization works end to end, and is all that
@@ -899,7 +921,7 @@ def list_upcoming(max_results=5):
     defines is a separate job, and doing both at once would make a failure here
     ambiguous.
     """
-    service = get_service()
+    service = get_service(credentials)
 
     # RFC3339 with an offset, which the API requires - a naive datetime is
     # rejected. The rest of the project is naive by design, so this is the one

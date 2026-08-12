@@ -1,0 +1,39 @@
+spring:
+  application:
+    name: gateway
+
+  # In memory for now. Nothing here is worth keeping between runs yet, and a
+  # real database is a deployment decision rather than a code one.
+  datasource:
+    url: jdbc:h2:mem:gateway;DB_CLOSE_DELAY=-1
+  jpa:
+    hibernate:
+      ddl-auto: update
+
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            # Never written here. This file is committed; the values are not.
+            client-id: ${GOOGLE_CLIENT_ID}
+            client-secret: ${GOOGLE_CLIENT_SECRET}
+            scope:
+              # Identity and calendar access in one consent screen. Asking
+              # twice would mean two prompts for what a user experiences as
+              # one decision - and the calendar scope is the reason any of
+              # this exists.
+              - openid
+              - email
+              - profile
+              - https://www.googleapis.com/auth/calendar.events
+
+server:
+  port: 8080
+
+# Where the Python service lives. It is expected to be unreachable from
+# anywhere else: it trusts the user id header this service sends, so anything
+# able to call it directly can claim to be anyone.
+calendar:
+  service:
+    base-url: http://127.0.0.1:5000

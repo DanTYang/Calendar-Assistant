@@ -434,7 +434,8 @@ def tools_for(source):
     return [tool for tool in TOOLS if tool["name"] not in WRITING_TOOLS]
 
 
-def run_tool(name, args, occurrences, chunks, source=WRITABLE_SOURCE):
+def run_tool(name, args, occurrences, chunks, source=WRITABLE_SOURCE,
+             user_memory=None, credentials=None):
     """Run the tool the model asked for and return its output as text.
 
     Errors are returned rather than raised. That looks wrong until you notice
@@ -463,26 +464,27 @@ def run_tool(name, args, occurrences, chunks, source=WRITABLE_SOURCE):
         if name == "search_notes":
             return search.search_notes(chunks, **args)
         if name == "remember_fact":
-            memory.save_fact(args["fact"])
+            # Saved against this person's file, not a shared one.
+            (user_memory or memory.UserMemory()).save_fact(args["fact"])
             return f"Saved: {args['fact']}"
         if name == "create_event":
             # Imported here rather than at the top: the Google libraries and a
             # sign-in are only needed by someone who actually writes.
             from assistant import google_api
-            return google_api.create_event(occurrences, **args)
+            return google_api.create_event(occurrences, credentials=credentials, **args)
         if name == "delete_event":
             from assistant import google_api
-            return google_api.delete_event(occurrences, **args)
+            return google_api.delete_event(occurrences, credentials=credentials, **args)
         if name == "update_event":
             from assistant import google_api
-            return google_api.update_event(occurrences, **args)
+            return google_api.update_event(occurrences, credentials=credentials, **args)
         # Models occasionally invent a tool name.
         return f"There is no tool called {name!r}."
     except Exception as error:
         return f"The tool {name} failed: {error}"
 
 
-def build_system_prompt():
+def build_system_prompt(user_memory=None):
     """Standing instructions sent with every message.
 
     The current date is the part that is not optional. The model has no clock,
@@ -492,21 +494,22 @@ def build_system_prompt():
     """
     prompt = SYSTEM_PROMPT.format(
         today=f"{config.NOW:%A %d %B %Y}", time=f"{config.NOW:%H:%M}")
-    facts = memory.facts_for_prompt()
+    facts = (user_memory or memory.UserMemory()).facts_for_prompt()
     return f"{prompt}\n\n{facts}" if facts else prompt
 
 
-def ask(question, occurrences, chunks, conversation=None, on_tool_call=None,
-        source=WRITABLE_SOURCE):
+def ask(question, occurrences, chunks, user_memory=None, on_tool_call=None,
+        source=WRITABLE_SOURCE, credentials=None):
     """Answer one question, running whatever tools the model asks for.
 
     `on_tool_call(name, args)` is invoked before each tool runs - watching the
     model pick tools is the fastest way to tell a good description from a bad
     one. Pass a conversation to keep context across questions.
     """
-    conversation = conversation or memory.Conversation()
+    user_memory = user_memory or memory.UserMemory()
+    conversation = user_memory.conversation
     conversation.add_user(question)
-    system = build_system_prompt()
+    system = build_system_prompt(user_memory)
 
     for _ in range(MAX_STEPS):
         reply = call_model(system, conversation.recent(),
@@ -525,7 +528,7 @@ def ask(question, occurrences, chunks, conversation=None, on_tool_call=None,
                 on_tool_call(call["name"], call["input"])
             results.append((call["id"],
                             run_tool(call["name"], call["input"], occurrences,
-                                  chunks, source)))
+                                  chunks, source, user_memory, credentials)))
         conversation.add_tool_results(results)
 
     return (f"I used too many steps ({MAX_STEPS}) without reaching an answer. "

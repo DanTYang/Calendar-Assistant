@@ -4,6 +4,7 @@
     python -m assistant.main agenda       # print a date range, no model needed
     python -m assistant.main birthdays    # print upcoming birthdays, no model needed
     python -m assistant.main cache        # save a local copy of a Google calendar
+    python -m assistant.main serve        # the same assistant over HTTP
 
 Choose where events come from with --source:
 
@@ -66,7 +67,7 @@ def chat(occurrences, chunks, source):
         print("No ANTHROPIC_API_KEY set - using the offline keyword model.")
     print("Ask me about your calendar. Type 'quit' to stop.\n")
 
-    conversation = memory.Conversation()
+    remembered = memory.UserMemory()
     while True:
         try:
             question = input("Q> ").strip()
@@ -76,7 +77,7 @@ def chat(occurrences, chunks, source):
         if question.lower() in {"quit", "exit"}:
             return
         if question:
-            answer = agent.ask(question, occurrences, chunks, conversation,
+            answer = agent.ask(question, occurrences, chunks, remembered,
                                on_tool_call=show_tool_call,
                                source=source)
             # Continuation lines are indented to sit under the text after "A> ",
@@ -108,6 +109,11 @@ def main():
     source_given = "--source" in args
     source = take_source(args)
     command = args[0] if args else "chat"
+
+    if command == "serve":
+        from assistant import web
+        web.main(source=source)
+        return 0
 
     if command == "cache":
         from assistant import google_calendar
