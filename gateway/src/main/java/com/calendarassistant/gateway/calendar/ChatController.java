@@ -47,6 +47,17 @@ public class ChatController {
     }
 
     /**
+     * The conversation this session already had.
+     *
+     * <p>No token is sent: reading back what was said needs no calendar access,
+     * and the fewer places a credential travels the better.
+     */
+    @GetMapping("/history")
+    public CalendarClient.History history(@AuthenticationPrincipal OidcUser principal) {
+        return calendar.history(accounts.require(principal).downstreamId());
+    }
+
+    /**
      * The CSRF token this session must echo back on any POST.
      *
      * <p>The token is created lazily, so something has to ask for it before the

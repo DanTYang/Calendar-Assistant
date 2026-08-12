@@ -2,13 +2,25 @@ spring:
   application:
     name: gateway
 
-  # In memory for now. Nothing here is worth keeping between runs yet, and a
-  # real database is a deployment decision rather than a code one.
+  # A file rather than memory, so a restart does not sign everyone out and
+  # hand the next arrival user 1. H2 is still the wrong database for a real
+  # deployment; the point of the change is that the data outlives the process.
   datasource:
-    url: jdbc:h2:mem:gateway;DB_CLOSE_DELAY=-1
+    url: jdbc:h2:file:./data/gateway;AUTO_SERVER=TRUE
   jpa:
     hibernate:
       ddl-auto: update
+  sql:
+    init:
+      # Creates the table Spring Security keeps authorised clients in. Written
+      # by hand rather than using the shipped script because that one is not
+      # safe to run twice, and now that the database is a file it runs on
+      # every start.
+      mode: always
+  session:
+    # Sessions in the same database. Without this the accounts survive a
+    # restart but the browser cookie does not, so everyone is still signed out.
+    store-type: jdbc
 
   security:
     oauth2:
@@ -31,9 +43,12 @@ spring:
 server:
   port: 8080
 
-# Where the Python service lives. It is expected to be unreachable from
-# anywhere else: it trusts the user id header this service sends, so anything
-# able to call it directly can claim to be anyone.
+# Where the Python service lives, and what proves this is the caller allowed
+# to ask. The calendar service believes the user id header it is sent, so the
+# shared secret is what stops anything else that can reach the port from
+# claiming to be anyone. Empty leaves it unauthenticated, which is only safe
+# while both processes are on one machine.
 calendar:
   service:
-    base-url: http://127.0.0.1:5000
+    base-url: ${CALENDAR_SERVICE_URL:http://127.0.0.1:5000}
+    secret: ${GATEWAY_SECRET:}

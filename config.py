@@ -62,6 +62,13 @@ TIMEZONE = ZoneInfo(os.environ.get("CALENDAR_TIMEZONE", "America/New_York"))
 # "wherever the phone is" - fine on a phone, useless from a laptop.
 HOME_ADDRESS = os.environ.get("HOME_ADDRESS", "")
 
+# Shared with whatever sits in front of the HTTP service. When set, every
+# request must carry it in X-Gateway-Key or be refused - which is what stops
+# "X-User-Id: someone-else" from working for anyone who can reach the port.
+# Unset leaves the service open, which is only safe on a machine where nothing
+# else can reach it.
+GATEWAY_SECRET = os.environ.get("GATEWAY_SECRET", "")
+
 # Working hours, used when looking for free time.
 WORK_START_HOUR = int(os.environ.get("WORK_START_HOUR", 9))
 WORK_END_HOUR = int(os.environ.get("WORK_END_HOUR", 17))

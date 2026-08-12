@@ -488,6 +488,7 @@ answer is wrong in `queries` or `agent` rather than here.
 | `GET /free-time?when=&duration_minutes=` | |
 | `GET /birthdays?within_days=` | |
 | `GET /notes?query=` | |
+| `GET /history` | what this caller has said, and what was answered |
 | `POST /chat` | `{"message": ...}` → the answer, plus which tools ran |
 
 `POST /chat` returns `tools_used` alongside the answer - the same trace the
@@ -501,6 +502,7 @@ Three outcomes, kept apart because only one of them is worth retrying:
 | | Meaning |
 |---|---|
 | **400** | The request was wrong. An unusable date phrase comes back with the list of phrases that work. |
+| **401** | No `X-Gateway-Key`, or the wrong one. |
 | **502** | Google or the model failed us. The request was fine. |
 | **500** | A defect here. The message is not echoed back, since it is written for us and may name internals. |
 
@@ -516,9 +518,18 @@ does. With `--source api` a token is required, because there is no calendar to
 read without one - and saying so is better than answering from an empty one,
 which reads as "you have nothing scheduled".
 
-> **Nothing here authenticates that header.** The service is meant to sit behind
-> something that does, and to be unreachable otherwise. A header anyone can set
-> is an identity anyone can claim.
+> **The header is not proof of identity.** This service never sees a password
+> or a consent screen, so it cannot check who anyone is. What it can check is
+> that the request came from the one service allowed to ask.
+
+Set `GATEWAY_SECRET` and every request must carry it in `X-Gateway-Key`, or be
+refused with a 401. `/health` is exempt, so a monitor can ask whether the
+process is alive without holding a credential. The gateway reads the same
+`.env`, so the two halves cannot drift apart - and a value set on only one side
+fails loudly rather than quietly leaving the service open.
+
+Without the secret set, `X-User-Id` is a claim anyone able to reach the port can
+make. That is fine on one machine and nowhere else.
 
 ## The gateway
 
@@ -539,6 +550,7 @@ both are registered as redirect URIs - Google compares them as strings.
 | `GET /me` | the signed-in account |
 | `GET /token-status` | whether a refresh token is held, and when the access token expires |
 | `GET /health`, `/calendar-health` | this service, and the one behind it |
+| `GET /history` | the conversation so far, so a reload does not start blank |
 | `POST /chat` | proxied downstream with the caller's id and token |
 | `POST /logout` | |
 
@@ -552,15 +564,26 @@ finds it again by subject and refreshes the display fields. There is no
 separate sign-up, and changing your Google address does not create a second
 account.
 
-**`prompt=consent` is deliberate.** Google issues a refresh token only on the
-consent that first grants access, so a returning user would otherwise arrive
+**Accounts, tokens, and sessions outlive the process.** They are in a database
+file rather than in memory, so restarting the server no longer signs everyone
+out and hands the next arrival user 1. Tokens are kept by Spring's
+`JdbcOAuth2AuthorizedClientService`, which means the refresh token survives too
+and an expired access token is renewed without anyone being asked again.
+
+**`prompt=consent` is still on.** Google issues a refresh token only on the
+consent that first grants access, so without it a returning user could arrive
 with an access token and no way to renew it - a failure that appears an hour
-later rather than at sign-in. The cost is a consent screen every time.
+later rather than at sign-in. Now that tokens persist this is closer to
+optional; see `DECISIONS.md`.
 
 **CSRF protection is on.** Sessions are carried by a cookie, which is precisely
 what lets another site post to this one on a signed-in user's behalf. The token
 is served from `GET /csrf`, which also causes the cookie to be written, since
 it is created lazily.
+
+**The conversation is not in the page.** It is kept by the calendar service and
+fetched on load, so a reload shows what was actually said rather than an empty
+window in front of an assistant that remembers all of it.
 
 ### The web interface
 
@@ -593,6 +616,18 @@ python -m assistant.main serve --source api
 # 3. a browser
 open http://localhost:8080/
 ```
+
+Set `GATEWAY_SECRET` in `.env` first. Both halves read it from there, and
+without it the calendar service answers anyone who can reach port 5000:
+
+```bash
+python3 -c "import secrets; print('GATEWAY_SECRET=' + secrets.token_urlsafe(32))" >> .env
+```
+
+On macOS, port 5000 is also AirPlay Receiver. It is bound to `::1` while Flask
+binds `127.0.0.1`, so `localhost:5000` can reach AirPlay and return a puzzling
+403. Use `127.0.0.1:5000`, or turn AirPlay Receiver off in System Settings.
+
 
 With `--source api` the calendar service needs no Google account of its own:
 every request brings the token it should use. Started any other way it reads
@@ -681,16 +716,16 @@ for 3 August 2026.
 
 ## Limitations
 
-**The calendar service trusts whoever calls it.** It believes `X-User-Id`, so
-anything able to reach it can claim to be anyone. That is only safe while it is
-unreachable except from the gateway. Before either is deployed anywhere, the
-service needs to be on a private network or the gateway needs to sign something
-it verifies.
+**The shared secret is symmetric.** Both services hold the same string, so it
+proves the caller is the gateway and nothing more - it does not prove which
+user, and anyone who reads it can use it. A signed token the calendar service
+verified without holding the signing key would be better. This is the level of
+protection the deployment needs, not the most that is possible.
 
-**The gateway forgets everything when it restarts.** Accounts are held in an
-in-memory database and sessions in memory, so a restart signs everyone out and
-the next person to arrive becomes user 1 again. Fine while developing, wrong
-for anything longer-lived.
+**The database is H2.** It is a file now rather than memory, so accounts,
+tokens, and sessions survive a restart, but H2 is a development database. A
+real deployment wants Postgres, which is a connection string and a dependency
+rather than a code change.
 
 **Both servers are development servers.** Flask says so on startup, and
 `spring-boot:run` is a development goal. Neither is meant to face the internet.

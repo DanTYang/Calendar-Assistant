@@ -7,10 +7,15 @@ wrong in `queries` or `agent`, not here - which is the point of keeping this
 layer thin.
 
 Who is asking arrives in the `X-User-Id` header, and everything remembered -
-this conversation, and the facts saved from it - is kept per person. Nothing
-here authenticates that header. It is trusted because the service is expected
-to sit behind something that does the authenticating, and be unreachable
-otherwise; a header anyone can set is an identity anyone can claim.
+this conversation, and the facts saved from it - is kept per person. This
+service does not authenticate that header, because it cannot: it never sees a
+password or a Google consent screen. What it can do is refuse to answer anyone
+who is not the service allowed to ask.
+
+Set `GATEWAY_SECRET` and every request must carry it in `X-Gateway-Key`.
+Without that, `X-User-Id` is a claim anyone able to reach this process can
+make. Leaving the secret unset keeps the terminal and single-user setups
+working unchanged, and is only safe while nothing else can reach the port.
 
 Access to the calendar arrives the same way, in `X-Google-Token`: an access
 token somebody else obtained and keeps renewed. Nothing here reads a token from
@@ -23,6 +28,7 @@ cache is keyed by person, which is the part that matters - the alternative is
 answering one person's question from another's calendar.
 """
 
+import hmac
 import time
 from datetime import timedelta
 
@@ -40,6 +46,10 @@ CALENDAR_TTL_SECONDS = 60
 
 class BadRequest(Exception):
     """The caller asked for something that does not make sense."""
+
+
+class NotAllowed(Exception):
+    """The caller did not prove it is the service allowed to ask."""
 
 
 class Upstream(Exception):
@@ -143,6 +153,26 @@ def create_app(source="file", occurrences=None, chunks=None):
         except ValueError as error:
             raise BadRequest(str(error)) from error
 
+    @app.before_request
+    def _check_caller():
+        """Refuse anyone who cannot prove they are the gateway.
+
+        Health is exempt so a load balancer or a person can still ask whether
+        the process is alive without holding a credential.
+        """
+        if not config.GATEWAY_SECRET or request.path == "/health":
+            return None
+        offered = request.headers.get("X-Gateway-Key", "")
+        # Compared in constant time: a plain != leaks where two secrets first
+        # differ, one request at a time.
+        if not hmac.compare_digest(offered, config.GATEWAY_SECRET):
+            raise NotAllowed("this service is not open to direct callers")
+        return None
+
+    @app.errorhandler(NotAllowed)
+    def _not_allowed(error):
+        return jsonify({"error": str(error)}), 401
+
     @app.errorhandler(BadRequest)
     def _bad_request(error):
         return jsonify({"error": str(error)}), 400
@@ -213,6 +243,16 @@ def create_app(source="file", occurrences=None, chunks=None):
             "query": query,
             "text": _run(lambda: search.search_notes(chunks, query)),
         })
+
+    @app.get("/history")
+    def history():
+        """What this caller has said so far, and what was answered.
+
+        The conversation lives here rather than in the page, so a reload shows
+        what actually happened instead of an empty window in front of an
+        assistant that remembers everything.
+        """
+        return jsonify({"turns": _memory_for(_caller()).transcript()})
 
     @app.post("/chat")
     def chat():

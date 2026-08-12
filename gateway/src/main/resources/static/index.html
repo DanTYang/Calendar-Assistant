@@ -70,7 +70,16 @@
     @keyframes fade { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
   }
 
-  .tools {
+  .earlier {
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin: 0.25rem 0 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.tools {
     font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     color: var(--muted); margin-bottom: .3rem;
   }
@@ -269,6 +278,34 @@ function toolTrace(tools, turn) {
   turn.prepend(line);
 }
 
+/* Put back what was said before this page existed.
+ *
+ * The conversation is kept by the calendar service, not here, so a reload used
+ * to empty the window while the assistant carried on remembering all of it -
+ * you could ask "what about the week after?" and get a sensible answer about
+ * nothing visible.
+ *
+ * Answers go through the same renderer as a live one. The tool trace is not
+ * replayed: it is a record of what happened just now, and stale confirmation
+ * buttons would be worse than absent ones - clicking "Go ahead" on a proposal
+ * from an hour ago is not something to make easy.
+ */
+function replay(turns) {
+  if (!turns || !turns.length) return;
+  for (const turn of turns) {
+    if (turn.role === 'user') {
+      bubble(turn.text, 'me');
+    } else {
+      renderAnswer(turn.text, bubble(null, null, ASSISTANT).querySelector('.bubble'));
+    }
+  }
+  const rule = document.createElement('div');
+  rule.className = 'earlier';
+  rule.textContent = 'earlier today';
+  log.insertBefore(rule, log.firstChild);
+  log.scrollTop = log.scrollHeight;
+}
+
 async function start() {
   try {
     const [token, me] = await Promise.all([
@@ -278,6 +315,13 @@ async function start() {
     csrf = token;
     document.getElementById('who').textContent = me ? me.email : 'not signed in';
     document.getElementById('signout').hidden = !me;
+
+    // Only once there is someone to have had a conversation. Asking while
+    // signed out would just be a 401.
+    if (me) {
+      const past = await fetch('/history').then(r => r.ok ? r.json() : null);
+      if (past) replay(past.turns);
+    }
   } catch (e) {
     document.getElementById('who').textContent = 'not signed in';
   }

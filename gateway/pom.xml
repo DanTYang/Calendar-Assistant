@@ -48,6 +48,13 @@
 		</dependency>
 
 		<dependency>
+			<!-- Sessions in the database rather than in memory, so restarting
+			     the server does not sign everyone out. -->
+			<groupId>org.springframework.session</groupId>
+			<artifactId>spring-session-jdbc</artifactId>
+		</dependency>
+
+		<dependency>
 			<groupId>com.h2database</groupId>
 			<artifactId>h2</artifactId>
 			<scope>runtime</scope>

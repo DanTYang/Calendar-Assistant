@@ -2,6 +2,9 @@ package com.calendarassistant.gateway.config;
 
 import com.calendarassistant.gateway.user.AccountService;
 import org.springframework.context.annotation.Bean;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.oauth2.client.JdbcOAuth2AuthorizedClientService;
+import org.springframework.security.oauth2.client.OAuth2AuthorizedClientService;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserRequest;
@@ -109,5 +112,24 @@ public class SecurityConfig {
             accounts.recordSignIn(principal);
             return principal;
         };
+    }
+
+    /**
+     * Keeps authorised clients - access tokens and, crucially, refresh tokens -
+     * in the database rather than in memory.
+     *
+     * <p>The default implementation is a map, so every restart threw away every
+     * token. That was survivable only because {@code prompt=consent} made each
+     * sign-in issue a fresh refresh token anyway. With them stored, Spring can
+     * renew an expired access token on its own, and a returning user does not
+     * have to approve anything again.
+     *
+     * <p>Declaring this bean is enough: Spring Boot notices it and wires the
+     * repository that reads and writes through it.
+     */
+    @Bean
+    OAuth2AuthorizedClientService authorizedClientService(
+            JdbcTemplate jdbc, ClientRegistrationRepository clients) {
+        return new JdbcOAuth2AuthorizedClientService(jdbc, clients);
     }
 }

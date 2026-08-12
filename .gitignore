@@ -29,3 +29,10 @@ client_secret*.json
 # Test suite - kept local, not published
 tests/
 pytest.ini
+
+# The gateway's database. Now that it is a file rather than memory it holds
+# real refresh tokens - long-lived calendar access for every account that has
+# signed in. Never commit it.
+gateway/data/
+*.mv.db
+*.trace.db

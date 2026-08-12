@@ -18,20 +18,28 @@ import org.springframework.web.client.RestClient;
  * token this service has already refreshed, so nothing downstream reads a
  * credential from disk or has to know how to renew one.
  *
- * <p>That arrangement is only safe because the calendar service is expected to
- * be unreachable except from here. It believes the user id header, so anything
- * able to call it directly can claim to be anyone.
+ * <p>{@code X-Gateway-Key} is what makes that safe. The calendar service
+ * believes the user id it is sent, so without a shared secret anything able to
+ * reach its port could claim to be anyone. With one, it answers only this
+ * service.
  */
 @Service
 public class CalendarClient {
 
     private final RestClient http;
 
-    public CalendarClient(@Value("${calendar.service.base-url}") String baseUrl) {
+    public CalendarClient(@Value("${calendar.service.base-url}") String baseUrl,
+                          @Value("${calendar.service.secret:}") String secret) {
         // Built directly rather than injected: there is nothing to customise
         // here, and depending on an auto-configured builder made this bean fail
         // to construct at startup.
-        this.http = RestClient.builder().baseUrl(baseUrl).build();
+        //
+        // The secret is attached once, to every request, rather than being
+        // remembered at each call site - the one that forgets is the hole.
+        this.http = RestClient.builder()
+                .baseUrl(baseUrl)
+                .defaultHeader("X-Gateway-Key", secret)
+                .build();
     }
 
     public record ChatRequest(String message) { }
@@ -57,6 +65,25 @@ public class CalendarClient {
                             new String(response.getBody().readAllBytes()));
                 })
                 .body(ChatReply.class));
+    }
+
+    public record Turn(String role, String text) { }
+
+    public record History(List<Turn> turns) { }
+
+    /**
+     * What this person has said so far, and what was answered.
+     *
+     * <p>The conversation lives in the calendar service, so a page that has
+     * just been reloaded can ask for it rather than starting blank in front of
+     * an assistant that remembers the whole thing.
+     */
+    public History history(String userId) {
+        return exchange(() -> http.get()
+                .uri("/history")
+                .header("X-User-Id", userId)
+                .retrieve()
+                .body(History.class));
     }
 
     public Map<String, Object> health() {

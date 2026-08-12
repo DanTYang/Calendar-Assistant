@@ -53,8 +53,17 @@ to renew it with - and that failure appears an hour later, not at sign-in.
 **Cost:** a consent screen every time, even for someone who has approved
 before.
 
-**Reverse:** remove the `prompt` query parameter once tokens are stored and
-reused across sessions. Keep `access_type=offline`.
+**Reverse:** remove the `prompt` query parameter from `SecurityConfig`. Keep
+`access_type=offline`.
+
+**The precondition is now met** - tokens are stored and reused, so a returning
+user has a refresh token already. What is left is the failure mode if that row
+is ever missing: someone who has approved before, whose stored token was lost
+(database wiped, migrated, or a new deployment), signs in, gets no refresh
+token because Google sees an existing grant, and breaks an hour later. Forcing
+consent means that can never happen. Removing it trades a prompt for a failure
+that is rare, delayed, and confusing. Worth doing once the storage is something
+you trust; not worth it while the database is a file in `gateway/data`.
 
 ---
 
@@ -138,17 +147,23 @@ looks doubtful.
 
 ---
 
-## 9. The Python service trusts a header
+## 9. A shared secret, rather than a signed token
 
-**Now:** `web.py` reads `X-User-Id` and believes it.
+**Settled.** The open version of this - the Python service believing
+`X-User-Id` from anyone - is closed. `GATEWAY_SECRET` is read from `.env` by
+both halves, sent as `X-Gateway-Key`, and compared in constant time. Without
+it, every endpoint but `/health` answers 401.
 
-**Bought:** the calendar service stays free of authentication, which is the
-point of putting the gateway in front of it.
+**What is still traded:** the secret is symmetric. It proves the caller is the
+gateway and nothing else - not which user, and not that the request was not
+replayed. Anyone who reads the secret can use it, and it is held in two places.
 
-**Cost:** anything able to reach the Python service directly can claim to be
-anyone.
+**The alternative** is the gateway signing a short-lived token naming the user,
+which the calendar service verifies with a public key. Then the calendar
+service holds no secret, the claim is about a user rather than a service, and
+a leaked token expires.
 
-**Reverse:** either keep the service unreachable except from the gateway
-(network), or have the gateway sign something the service verifies (shared
-secret). **This one is not optional before anything is deployed** - it is only
-safe while both processes are on your laptop.
+**Reverse:** unset `GATEWAY_SECRET` and the check disables itself, which is
+what keeps the terminal and single-user setups working.
+
+**Worth revisiting when** the two services stop being on one machine.

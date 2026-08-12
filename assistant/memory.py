@@ -166,3 +166,28 @@ class UserMemory:
 
     def save_fact(self, fact):
         return save_fact(fact, self.facts_file)
+
+    def transcript(self):
+        """This conversation as plain turns, for showing rather than sending.
+
+        `Conversation.recent()` returns what the API expects: content blocks,
+        tool calls, and tool results interleaved. A page that has just been
+        reloaded wants none of that - only who said what.
+
+        Tool results are skipped even though they arrive with role "user".
+        They were never typed by anyone, and showing them would put the raw
+        output of every search back in the window as though the person had
+        said it.
+        """
+        turns = []
+        for message in self.conversation.messages:
+            said = []
+            for block in message.get("content", []):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    said.append(block["text"])
+                elif isinstance(block, str):
+                    said.append(block)
+            text = "\n".join(part for part in said if part.strip())
+            if text:
+                turns.append({"role": message["role"], "text": text})
+        return turns
