@@ -1,8 +1,10 @@
 # Calendar Assistant
 
-A command-line assistant that answers natural-language questions about a Google
-Calendar and a folder of markdown meeting notes, and can add, change, and remove
-events, using the Claude API.
+An assistant that answers natural-language questions about a Google Calendar and
+a folder of markdown meeting notes, and can add, change, and remove events,
+using the Claude API. It runs as a terminal program, as an HTTP service, or
+behind a Spring Boot gateway that signs people in with Google and serves a web
+interface.
 
 ## Overview
 
@@ -50,6 +52,32 @@ Without `ANTHROPIC_API_KEY` the application runs against an offline
 keyword-matching model that selects tools by regular expression and prints raw
 tool output. Every code path except answer phrasing is exercised.
 
+### Two services
+
+The same assistant is reachable three ways, and the first two are one process:
+
+| | What it is | Who it serves |
+|---|---|---|
+| `python -m assistant.main` | terminal chat | you, on your machine |
+| `python -m assistant.main serve` | the same thing over HTTP | one caller, or many |
+| `gateway/` | Spring Boot: Google sign-in, accounts, web interface | anybody with a browser |
+
+The split is along a real seam. **Spring owns identity** - the OAuth flow, the
+session, the user record, and refreshing tokens. **Python owns calendars** - the
+recurrence rules, the date arithmetic, and the agent loop. Neither knows much
+about the other's job, and the whole contract between them is two headers:
+
+```
+POST /chat
+X-User-Id:      42                 this application's own id for the person
+X-Google-Token: ya29....           an access token Spring has already refreshed
+```
+
+That arrangement is what makes the Python service **stateless**. It reads no
+token from disk, holds no account of its own, and keeps nothing after the
+request that carried it - so one process answers for any number of people, each
+from their own calendar.
+
 ## Demo
 
 ![Demo](docs/demo.gif)
@@ -57,6 +85,19 @@ tool output. Every code path except answer phrasing is exercised.
 ## Architecture
 
 ```
+                      browser
+                         |
+                         v
+gateway (Java)  Google sign-in, sessions, accounts, the chat page
+                         |
+                         |  X-User-Id + X-Google-Token
+                         v
+web.py          HTTP: /chat, /events, /free-time, /birthdays, /notes
+                         |
+                         v          (the terminal enters here instead)
+                      agent
+                         |
+                         v
 local .ics file    secret iCal URL    Google Calendar API
         |                 |                    |
         v                 v                    v
@@ -105,6 +146,7 @@ is converted and spliced into the live occurrence list.
 | [`memory.py`](assistant/memory.py) | Conversation history and facts persisted to disk. |
 | [`google_calendar.py`](assistant/google_calendar.py) | Downloads and caches the secret iCal address. |
 | [`google_api.py`](assistant/google_api.py) | OAuth sign-in, token storage and revocation, Google JSON → event dictionaries, and the create / update / delete tools. |
+| [`web.py`](assistant/web.py) | The HTTP interface. Reads the caller and their token from request headers; holds no state of its own beyond a short-lived calendar cache. |
 | [`llm.py`](assistant/llm.py) | Claude API wrapper with an offline fallback model. |
 | [`config.py`](config.py) | Settings resolved from the environment, including the injected clock. |
 
@@ -252,7 +294,11 @@ pip install -r requirements.txt
 
 Developed against Python 3.12. Dependencies are `python-dateutil`, `anthropic`,
 and `python-dotenv`, plus `google-auth-oauthlib` and `google-api-python-client`
-for the authorized API path.
+for the authorized API path, and `flask` for the HTTP service.
+
+The gateway needs a JDK 21 or later and nothing else - it carries a Maven
+wrapper, so `./gateway/run.sh` fetches its own build tool and dependencies the
+first time it runs.
 
 ### Configuration
 
@@ -299,7 +345,21 @@ calendar → Integrate calendar → **Secret address in iCal format**.
 ### Signing in
 
 Reading a calendar over `--source api`, and every tool that writes, needs an
-OAuth client. In the [Google Cloud console](https://console.cloud.google.com):
+OAuth client. **Two of them, if you run the gateway**, because Google treats
+the two flows as different kinds of application:
+
+| Client type | Used by | Redirect |
+|---|---|---|
+| **Desktop app** | the terminal (`login`) | a throwaway local server on a random port |
+| **Web application** | the gateway | `http://localhost:8080/login/oauth2/code/google` |
+
+Both live on the same project and share one consent screen, so scopes and test
+users are configured once. The steps below create the desktop one; for the
+gateway, choose **Web application** instead and register that redirect URI
+exactly - Google compares it as a string, and `localhost` and `127.0.0.1` are
+not the same.
+
+In the [Google Cloud console](https://console.cloud.google.com):
 
 1. Create or select a project, and stay in it for every step below.
 2. Enable the **Google Calendar API**. Do this first — the scope in step 4 does
@@ -412,6 +472,133 @@ python -m assistant.main cache
 CALENDAR_FILE=data/google_cache.ics python -m assistant.main
 ```
 
+## The HTTP service
+
+```bash
+python -m assistant.main serve [--source file|url|api]
+```
+
+Every endpoint hands off to the functions the terminal already uses, so a wrong
+answer is wrong in `queries` or `agent` rather than here.
+
+| Endpoint | |
+|---|---|
+| `GET /health` | what loaded, and whether this process can write |
+| `GET /events?when=&person=&contains=` | |
+| `GET /free-time?when=&duration_minutes=` | |
+| `GET /birthdays?within_days=` | |
+| `GET /notes?query=` | |
+| `POST /chat` | `{"message": ...}` → the answer, plus which tools ran |
+
+`POST /chat` returns `tools_used` alongside the answer - the same trace the
+terminal prints. A caller has no other way to see which tool ran, and when one
+of them changed a calendar that is the interesting part.
+
+### What a failure means
+
+Three outcomes, kept apart because only one of them is worth retrying:
+
+| | Meaning |
+|---|---|
+| **400** | The request was wrong. An unusable date phrase comes back with the list of phrases that work. |
+| **502** | Google or the model failed us. The request was fine. |
+| **500** | A defect here. The message is not echoed back, since it is written for us and may name internals. |
+
+### Who is asking
+
+`X-User-Id` names the caller; `X-Google-Token` carries their access token.
+Conversations, saved facts, and calendars are all kept per person, and the
+token is used for that request and then forgotten.
+
+Both headers are optional. Without them the service answers as a single
+anonymous user from whatever `--source` was given, which is what the terminal
+does. With `--source api` a token is required, because there is no calendar to
+read without one - and saying so is better than answering from an empty one,
+which reads as "you have nothing scheduled".
+
+> **Nothing here authenticates that header.** The service is meant to sit behind
+> something that does, and to be unreachable otherwise. A header anyone can set
+> is an identity anyone can claim.
+
+## The gateway
+
+A Spring Boot application that signs people in with Google, keeps an account
+for each of them, and serves the web interface. It is the only part exposed to
+a browser.
+
+```bash
+./gateway/run.sh          # reads the OAuth client from OAuthCrediential.json
+```
+
+Then <http://localhost:8080/>. Use `localhost` rather than `127.0.0.1` unless
+both are registered as redirect URIs - Google compares them as strings.
+
+| | |
+|---|---|
+| `GET /` | the chat page |
+| `GET /me` | the signed-in account |
+| `GET /token-status` | whether a refresh token is held, and when the access token expires |
+| `GET /health`, `/calendar-health` | this service, and the one behind it |
+| `POST /chat` | proxied downstream with the caller's id and token |
+| `POST /logout` | |
+
+**Accounts are keyed on the Google subject**, never the email address.
+Addresses change and get reused, and keying on one would let a new owner of an
+old address inherit the previous owner's history. The email is stored for
+display only.
+
+**Signing in is registration.** The first arrival writes a row; every later one
+finds it again by subject and refreshes the display fields. There is no
+separate sign-up, and changing your Google address does not create a second
+account.
+
+**`prompt=consent` is deliberate.** Google issues a refresh token only on the
+consent that first grants access, so a returning user would otherwise arrive
+with an access token and no way to renew it - a failure that appears an hour
+later rather than at sign-in. The cost is a consent screen every time.
+
+**CSRF protection is on.** Sessions are carried by a cookie, which is precisely
+what lets another site post to this one on a signed-in user's behalf. The token
+is served from `GET /csrf`, which also causes the cookie to be written, since
+it is created lazily.
+
+### The web interface
+
+One page, no framework. Message bubbles, a thinking indicator, and the tool
+trace under each answer.
+
+Answers are markdown, so they are rendered - bold titles, lists, and clickable
+Maps links. Every node is built and filled with `textContent`; nothing is ever
+assigned to `innerHTML`. That is not stylistic caution. The text passing through
+contains event titles, which come from a calendar that may hold events other
+people created, and `<img src=x onerror=...>` is a legal calendar entry.
+
+Confirmations become **Go ahead** and **Cancel** buttons. Whether to offer them
+is not decided by reading the answer for a question mark - the wording varies -
+but from the tool trace: a writing tool that ran without `confirm` means the
+tool described what it would do and changed nothing. The buttons send the same
+words you would have typed, so typing still works.
+
+## Running the whole thing
+
+Three terminals, or two if you skip the browser.
+
+```bash
+# 1. the calendar service, reading whichever calendar the caller signs in to
+python -m assistant.main serve --source api
+
+# 2. the gateway
+./gateway/run.sh
+
+# 3. a browser
+open http://localhost:8080/
+```
+
+With `--source api` the calendar service needs no Google account of its own:
+every request brings the token it should use. Started any other way it reads
+one calendar and serves it to everyone, which is right for a single user and
+wrong for several.
+
 ## Design decisions
 
 **Calendar acquisition is separated from parsing.**
@@ -494,6 +681,20 @@ for 3 August 2026.
 
 ## Limitations
 
+**The calendar service trusts whoever calls it.** It believes `X-User-Id`, so
+anything able to reach it can claim to be anyone. That is only safe while it is
+unreachable except from the gateway. Before either is deployed anywhere, the
+service needs to be on a private network or the gateway needs to sign something
+it verifies.
+
+**The gateway forgets everything when it restarts.** Accounts are held in an
+in-memory database and sessions in memory, so a restart signs everyone out and
+the next person to arrive becomes user 1 again. Fine while developing, wrong
+for anything longer-lived.
+
+**Both servers are development servers.** Flask says so on startup, and
+`spring-boot:run` is a development goal. Neither is meant to face the internet.
+
 **Only the API source understands a changed occurrence.** `--source api` folds
 Google's override records back into the series it belongs to; the `.ics` parser
 still skips the equivalent `RECURRENCE-ID` components. So a moved occurrence
@@ -528,6 +729,15 @@ is regular-expression matching and the response is raw tool output.
 ## Future features
 
 Ordered roughly by how much new machinery each one drags in.
+
+- **Keep accounts and tokens between restarts.** Spring can persist authorised
+  clients, including refresh tokens, rather than holding them in memory; the
+  user table needs a real database rather than H2. Until then the gateway is
+  usable only for as long as it stays running.
+
+- **The conversation survives a reload.** The calendar service remembers what
+  was said; the page does not, so refreshing empties the window while the
+  assistant carries on as though nothing happened.
 
 - **Teach the `.ics` parser about `RECURRENCE-ID`.** The API source folds
   changed occurrences back into their series; the file and feed sources do not,
