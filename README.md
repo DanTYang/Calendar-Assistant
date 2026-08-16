@@ -78,10 +78,11 @@ token from disk, holds no account of its own, and keeps nothing after the
 request that carried it - so one process answers for any number of people, each
 from their own calendar.
 
+<!--
 ## Demo
 
 ![Demo](docs/demo.gif)
-
+-->
 ## Architecture
 
 ```
