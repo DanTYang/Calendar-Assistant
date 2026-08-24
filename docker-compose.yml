@@ -1,0 +1,71 @@
+# Both services and a real database, the way they run in production.
+#
+# The point is parity rather than convenience: Postgres instead of H2 here
+# means a query that works locally works deployed, and the shared secret is
+# exercised rather than left unset.
+#
+#   docker compose up --build
+#   open http://localhost:8080
+#
+# Sign-in needs http://localhost:8080/login/oauth2/code/google registered on
+# the web OAuth client, which it already is if you have run the gateway
+# locally before.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-localdev}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The gateway fails to start against a database that is listening but
+      # not yet ready, so waiting for the port alone is not enough.
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  calendar:
+    build: .
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set this in .env}
+      GATEWAY_SECRET: ${GATEWAY_SECRET:?set this in .env}
+      CALENDAR_SOURCE: api
+      CALENDAR_NOW: now
+      DAILY_LIMIT_USD: ${DAILY_LIMIT_USD:-0.50}
+      MONTHLY_LIMIT_USD: ${MONTHLY_LIMIT_USD:-20}
+      TIMEZONE: ${TIMEZONE:-America/New_York}
+    volumes:
+      # Saved facts and the spend ledgers. Without this they are lost every
+      # time the container is replaced, and a spending limit that forgets is
+      # not much of a limit.
+      - calendardata:/app/data
+    # Not published to the host. Nothing outside this network has any business
+    # reaching it, which is the arrangement the shared secret assumes.
+    expose:
+      - "8000"
+
+  gateway:
+    build: ./gateway
+    depends_on:
+      db:
+        condition: service_healthy
+      calendar:
+        condition: service_started
+    environment:
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:?set this in .env}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:?set this in .env}
+      GATEWAY_SECRET: ${GATEWAY_SECRET:?set this in .env}
+      CALENDAR_SERVICE_URL: http://calendar:8000
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/gateway
+      SPRING_DATASOURCE_USERNAME: gateway
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-localdev}
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
+  calendardata:

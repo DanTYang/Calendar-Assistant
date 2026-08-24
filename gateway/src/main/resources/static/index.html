@@ -270,6 +270,9 @@ function bubble(text, kind, sender) {
 // something changed the calendar, which tool ran is the interesting part.
 function toolTrace(tools, turn) {
   if (!tools || !tools.length) return;
+  // Called again each time another tool runs, so the previous line goes.
+  const existing = turn.querySelector('.tools');
+  if (existing) existing.remove();
   const line = document.createElement('div');
   line.className = 'tools';
   line.textContent = tools
@@ -389,15 +392,52 @@ form.addEventListener('submit', (event) => {
   submit(message);
 });
 
+/* Read a server-sent-events body off a fetch response.
+ *
+ * EventSource would do this for us and cannot: it only issues GET requests,
+ * and the question has to be a POST with a CSRF header. So the framing is
+ * parsed here, which is little more than splitting on blank lines.
+ *
+ * Events can be split across network chunks, so anything after the last blank
+ * line is held back rather than parsed - a half-arrived JSON object is not
+ * valid JSON, and the rest of it is in the next chunk.
+ */
+async function* readEvents(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop();
+    for (const frame of frames) {
+      const line = frame.split('\n').find(l => l.startsWith('data: '));
+      if (!line) continue;
+      try {
+        yield JSON.parse(line.slice(6));
+      } catch (e) {
+        // A frame we cannot read is not worth killing the answer over.
+      }
+    }
+  }
+}
+
 async function submit(message) {
   if (!message || !csrf) return;
 
   bubble(message, 'me');
   send.disabled = true;
   const pending = bubble(null, null, ASSISTANT);
+  const body = pending.querySelector('.bubble');
+  let text = '';
+  const tools = [];
 
   try {
-    const response = await fetch('/chat', {
+    const response = await fetch('/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', [csrf.headerName]: csrf.token },
       body: JSON.stringify({ message }),
@@ -410,16 +450,49 @@ async function submit(message) {
       return;
     }
 
-    const body = await response.json();
     if (!response.ok) {
+      // A refusal arrives before any bytes do - too long, over budget, no
+      // token - so it is still an ordinary JSON body with a status code.
+      let problem = 'Request failed (' + response.status + ')';
+      try {
+        problem = (await response.json()).error || problem;
+      } catch (e) { /* not JSON; the status will have to do */ }
       pending.remove();
-      bubble(body.error || ('Request failed (' + response.status + ')'), 'err', ASSISTANT);
+      bubble(problem, 'err', ASSISTANT);
       return;
     }
 
-    const tools = body.tools_used || body.toolsUsed;
-    renderAnswer(body.answer, pending.querySelector('.bubble'));
-    toolTrace(tools, pending);
+    let failed = null;
+    for await (const event of readEvents(response)) {
+      if (event.type === 'text') {
+        // Written in as it arrives, as plain text. Markdown cannot be rendered
+        // halfway - a list is not a list until its last line - so the
+        // formatting is applied once at the end.
+        text += event.text;
+        body.textContent = text;
+        log.scrollTop = log.scrollHeight;
+      } else if (event.type === 'tool') {
+        tools.push({ tool: event.tool, arguments: event.arguments });
+        toolTrace(tools, pending);
+        log.scrollTop = log.scrollHeight;
+      } else if (event.type === 'error') {
+        failed = event.error;
+      }
+    }
+
+    if (failed && !text) {
+      pending.remove();
+      bubble(failed, 'err', ASSISTANT);
+      return;
+    }
+
+    renderAnswer(text, body);
+    if (failed) {
+      const note = document.createElement('div');
+      note.className = 'tools';
+      note.textContent = failed;
+      body.appendChild(note);
+    }
     if (awaitingConfirmation(tools)) offerConfirmation(pending);
   } catch (e) {
     pending.remove();
@@ -427,6 +500,7 @@ async function submit(message) {
   } finally {
     send.disabled = false;
     input.focus();
+    log.scrollTop = log.scrollHeight;
   }
 }
 

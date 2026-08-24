@@ -36,3 +36,7 @@ pytest.ini
 gateway/data/
 *.mv.db
 *.trace.db
+
+# Per-person spending ledgers. Not secret in the way a token is, but it is a
+# record of who used this and how much - other people's, not only yours.
+data/spend/

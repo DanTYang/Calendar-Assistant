@@ -82,24 +82,7 @@ after either side has history worth keeping separate.
 
 ---
 
-## 5. The tests are not published
-
-**Now:** `.gitignore` excludes `tests/` and `pytest.ini`. Inherited, not chosen
-by me.
-
-**Cost:** 138 tests do not reach GitHub, including the ones that caught the
-four-hour timezone bug, the duplicate occurrence, and the path-traversal case.
-Anyone cloning gets none of that, and anyone reading the repository sees no
-evidence any of it was tested.
-
-**Reverse:** remove those two lines from `.gitignore`.
-
-**Worth reconsidering** if the repository is ever something you point an
-employer at - the tests are the strongest evidence in it.
-
----
-
-## 6. Location classification errs towards "somewhere to go"
+## 5. Location classification errs towards "somewhere to go"
 
 **Now:** `queries.location_kind` returns `place` unless the location names a
 video call or a meeting room.
@@ -111,11 +94,12 @@ most real events.
 **Cost:** an odd location gets an odd link rather than nothing.
 
 **Reverse:** tighten `location_kind` to require something address-shaped. The
-tests in `test_queries.py` document the current boundary.
+boundary is stated in `queries.VIRTUAL_MARKERS` and `queries.ROOM_PREFIX`:
+anything they do not match is treated as a place.
 
 ---
 
-## 7. Behaviour specified in prose, not code
+## 6. Behaviour specified in prose, not code
 
 **Now:** the system prompt in `agent.py` carries widening, offering directions,
 and how to talk. It is considerably longer than the one the project started
@@ -131,7 +115,7 @@ when a model changes, and nothing fails when it does.
 
 ---
 
-## 8. Accounts are keyed on the Google subject
+## 7. Accounts are keyed on the Google subject
 
 **Now:** `AppUser.googleSubject` is unique and not updatable. Email is stored
 for display only.
@@ -147,7 +131,7 @@ looks doubtful.
 
 ---
 
-## 9. A shared secret, rather than a signed token
+## 8. A shared secret, rather than a signed token
 
 **Settled.** The open version of this - the Python service believing
 `X-User-Id` from anyone - is closed. `GATEWAY_SECRET` is read from `.env` by
@@ -167,3 +151,61 @@ a leaked token expires.
 what keeps the terminal and single-user setups working.
 
 **Worth revisiting when** the two services stop being on one machine.
+
+---
+
+## 9. Spending is tracked in files
+
+**Now:** `data/spend/`, one JSON file per person, hashed filenames like the
+saved facts.
+
+**Bought:** no database in the calendar service, which is what keeps it
+stateless and lets it be deployed without one.
+
+**Cost:** a deploy resets everyone's daily spend, because an App Runner
+container starts with an empty filesystem. And two instances would each count
+separately, so the real total would be the sum of both - which is why the
+service has to stay pinned to one.
+
+**Reverse:** move the ledger into the gateway's Postgres, beside the accounts.
+The awkward part is that it would make the calendar service depend on a
+database it currently knows nothing about; the alternative is DynamoDB, which
+it could reach without one.
+
+**Worth doing when** the limit has to hold rather than mostly hold.
+
+---
+
+## 10. Deployed, the calendar service is reachable from the internet
+
+**Now:** both App Runner services are public. `GATEWAY_SECRET` is the only
+thing between the calendar service and anyone who finds its URL.
+
+**Bought:** no VPC ingress endpoint to configure, and the deployment stays
+short enough to follow.
+
+**Cost:** the secret is now load-bearing in a way it is not on a laptop. It is
+symmetric, it lives in two places, and anyone who reads it can use it.
+
+**Reverse:** an App Runner VPC ingress endpoint makes the calendar service
+private, and then the secret is a second layer rather than the only one.
+
+**Worth doing when** this stops being a personal project. Related: entry 8.
+
+---
+
+## 11. All model output is streamed, not just the answer
+
+**Now:** `ask_stream` yields text from every step. The model often says what it
+is about to do before reaching for a tool, and that text reaches the page.
+
+**Bought:** something appears sooner, and it is real output rather than a
+placeholder.
+
+**Cost:** the page shows preamble that the plain `/chat` endpoint would never
+have returned - `ask` still returns only the final reply. The two endpoints can
+therefore show slightly different text for the same question.
+
+**Reverse:** buffer text per step and only yield it once the step turns out to
+have no tool calls. The cost is that the buffered step is no longer streamed at
+all, since whether it is the last one is only known when it finishes.

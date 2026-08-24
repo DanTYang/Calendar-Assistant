@@ -6,6 +6,8 @@ spring:
   # hand the next arrival user 1. H2 is still the wrong database for a real
   # deployment; the point of the change is that the data outlives the process.
   datasource:
+    # Overridden by SPRING_DATASOURCE_URL in a container, where H2 would be
+    # written to a filesystem that does not survive a deploy.
     url: jdbc:h2:file:./data/gateway;AUTO_SERVER=TRUE
   jpa:
     hibernate:
@@ -14,13 +16,20 @@ spring:
     init:
       # Creates the table Spring Security keeps authorised clients in. Written
       # by hand rather than using the shipped script because that one is not
-      # safe to run twice, and now that the database is a file it runs on
-      # every start.
+      # safe to run twice, and the database is no longer thrown away between
+      # runs. Same for the session tables below.
       mode: always
+      # Picks schema-h2.sql or schema-postgresql.sql. The types differ - H2
+      # wants blob where Postgres wants bytea - so one file cannot serve both.
+      platform: ${DB_PLATFORM:h2}
   session:
     # Sessions in the same database. Without this the accounts survive a
     # restart but the browser cookie does not, so everyone is still signed out.
     store-type: jdbc
+    jdbc:
+      initialize-schema: always
+      schema: classpath:session-schema-@@platform@@.sql
+      platform: ${DB_PLATFORM:h2}
 
   security:
     oauth2:
@@ -42,6 +51,11 @@ spring:
 
 server:
   port: 8080
+  # App Runner terminates TLS and forwards over plain HTTP. Without this Spring
+  # builds the OAuth redirect from the scheme it sees - http - and Google
+  # refuses it, because the registered URI is https. The symptom is a
+  # redirect_uri_mismatch that looks like a console misconfiguration.
+  forward-headers-strategy: framework
 
 # Where the Python service lives, and what proves this is the caller allowed
 # to ask. The calendar service believes the user id header it is sent, so the

@@ -29,13 +29,14 @@ answering one person's question from another's calendar.
 """
 
 import hmac
+import json
 import time
 from datetime import timedelta
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request, stream_with_context
 
 import config
-from assistant import agent, memory, queries, recurrence, search
+from assistant import agent, memory, queries, recurrence, search, spend
 
 
 # How long a fetched calendar is reused before going back to Google. Short
@@ -50,6 +51,10 @@ class BadRequest(Exception):
 
 class NotAllowed(Exception):
     """The caller did not prove it is the service allowed to ask."""
+
+
+class OverBudget(Exception):
+    """This person, or everyone together, has spent the allowance."""
 
 
 class Upstream(Exception):
@@ -177,6 +182,12 @@ def create_app(source="file", occurrences=None, chunks=None):
     def _bad_request(error):
         return jsonify({"error": str(error)}), 400
 
+    @app.errorhandler(OverBudget)
+    def _over_budget(error):
+        # 429 rather than 403: the request was allowed and well-formed, there
+        # is simply no allowance left. It is the status that means "later".
+        return jsonify({"error": str(error)}), 429
+
     @app.errorhandler(Upstream)
     def _upstream(error):
         # 502 rather than 500: the request was fine, something we depend on
@@ -244,6 +255,15 @@ def create_app(source="file", occurrences=None, chunks=None):
             "text": _run(lambda: search.search_notes(chunks, query)),
         })
 
+    @app.get("/usage")
+    def usage():
+        """What this caller has spent, and what is left.
+
+        Worth exposing rather than only enforcing: a limit that appears without
+        warning reads as a broken service.
+        """
+        return jsonify(spend.summary(_caller()))
+
     @app.get("/history")
     def history():
         """What this caller has said so far, and what was answered.
@@ -253,6 +273,77 @@ def create_app(source="file", occurrences=None, chunks=None):
         assistant that remembers everything.
         """
         return jsonify({"turns": _memory_for(_caller()).transcript()})
+
+    def _prepare(payload):
+        """Everything that must be settled before an answer starts.
+
+        Shared by both chat endpoints, and called before the streaming one
+        returns a Response - once bytes are going out the status code is
+        already sent, so a refusal after that point cannot be a 429 or a 400.
+        It would have to be an error event in the middle of the stream, which
+        is far harder for a caller to handle.
+        """
+        message = str(payload.get("message", "")).strip()
+        if not message:
+            raise BadRequest("message is required")
+
+        user_id = _caller()
+        credentials = _credentials()
+        if credentials is None and app.config["SOURCE"] == agent.WRITABLE_SOURCE:
+            # Better said plainly than answered from an empty calendar, which
+            # reads as "you have nothing scheduled".
+            raise BadRequest(
+                "this service is serving the Google Calendar API, so a request "
+                "must carry the caller's access token in X-Google-Token")
+
+        try:
+            spend.check(user_id)
+        except spend.LimitReached as reached:
+            raise OverBudget(str(reached)) from reached
+
+        return message, user_id, credentials
+
+    @app.post("/chat/stream")
+    def chat_stream():
+        """The same answer, sent as it is written.
+
+        Server-sent events rather than a websocket: this is one-way and short,
+        and SSE is a plain HTTP response a proxy already understands.
+        """
+        message, user_id, credentials = _prepare(request.get_json(silent=True) or {})
+        occurrences = _occurrences_for(user_id, credentials)
+        memory_for_caller = _memory_for(user_id)
+
+        def events():
+            def frame(event):
+                return f"data: {json.dumps(event)}\n\n"
+
+            try:
+                for event in agent.ask_stream(
+                        message, occurrences, chunks, memory_for_caller,
+                        source=app.config["SOURCE"], credentials=credentials,
+                        on_usage=lambda u: spend.record(user_id, u)):
+                    yield frame(event)
+            except Exception as error:
+                # The status line is long gone, so a failure has to travel as
+                # an event. Named "error" so a caller can tell it from an
+                # answer rather than printing an exception into the chat.
+                app.logger.exception("streaming failed")
+                yield frame({"type": "error",
+                             "error": f"the assistant could not answer: {error}"})
+                return
+            yield frame({"type": "done", "usage": spend.summary(user_id)})
+
+        return Response(
+            stream_with_context(events()),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                # Tells nginx and App Runner not to sit on the bytes. Without
+                # it the whole point is lost: the answer arrives in one piece
+                # at the end, exactly as it did before.
+                "X-Accel-Buffering": "no",
+            })
 
     @app.post("/chat")
     def chat():
@@ -272,6 +363,14 @@ def create_app(source="file", occurrences=None, chunks=None):
             raise BadRequest(
                 "this service is serving the Google Calendar API, so a request "
                 "must carry the caller's access token in X-Google-Token")
+        # Checked before the call, not after. Noticing afterwards means the
+        # limit is always passed by one question - and one question has no
+        # upper bound if the model keeps reaching for tools.
+        try:
+            spend.check(user_id)
+        except spend.LimitReached as reached:
+            raise OverBudget(str(reached)) from reached
+
         used = []
         try:
             answer = agent.ask(
@@ -279,14 +378,18 @@ def create_app(source="file", occurrences=None, chunks=None):
                 _memory_for(user_id),
                 on_tool_call=lambda name, args: used.append(
                     {"tool": name, "arguments": args}),
-                source=app.config["SOURCE"], credentials=credentials)
+                source=app.config["SOURCE"], credentials=credentials,
+                # Recorded per call rather than per question, so tokens spent
+                # by a question that then failed are still counted. They were
+                # spent either way.
+                on_usage=lambda u: spend.record(user_id, u))
         except Exception as error:
             # A tool that fails returns its message to the model rather than
             # raising, so reaching here means the model itself was unreachable.
             raise Upstream(f"the assistant could not answer: {error}") from error
 
         return jsonify({"answer": answer, "tools_used": used,
-                        "user": user_id})
+                        "user": user_id, "usage": spend.summary(user_id)})
 
     return app
 

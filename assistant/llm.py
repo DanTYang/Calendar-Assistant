@@ -1,25 +1,23 @@
-"""
-=============================================================================
-GIVEN CODE — you do not need to edit this file.
-=============================================================================
+"""The layer that talks to the language model.
 
-This is the thin layer that talks to the language model. It is given to you so
-you can spend your time on the interesting parts instead of on API plumbing.
+Everything above this file works in one shape and one shape only:
 
-Two things worth knowing about it:
+    {
+      "text":       the words the model said, possibly empty
+      "tool_calls": [{"id": ..., "name": ..., "input": {...}}, ...]
+      "content":    the raw blocks, appended straight into the conversation
+      "usage":      {"input": n, "output": n, "cache_read": n, "cache_write": n}
+    }
 
-1. If you have not set an API key, it falls back to a FAKE model that picks
-   tools using simple keyword matching. That is not intelligence — it is a
-   stand-in so you can build and test Parts 1-6 without spending a cent. When
-   you set ANTHROPIC_API_KEY, the exact same code runs against the real model.
+Keeping that shape fixed is what lets `agent.py` stay a loop over tool calls
+rather than a translation layer, and it is why `usage` is reported here rather
+than measured somewhere else - it is what the API said, not an estimate.
+`spend.py` turns those numbers into dollars.
 
-2. `call_model()` always returns the same dictionary shape:
-
-       {
-         "text":       "the words the model said (may be empty)",
-         "tool_calls": [ {"id": ..., "name": ..., "input": {...}}, ... ],
-         "content":    [ raw blocks — append this straight into your history ]
-       }
+Without `ANTHROPIC_API_KEY` set, a keyword-matching stand-in answers instead.
+It picks tools by looking for words and understands nothing, which is enough
+to exercise the agent loop, the tools, and every test in the suite offline and
+for free. The code path around it is identical: same shape in, same shape out.
 """
 
 import os
@@ -36,13 +34,42 @@ def have_api_key():
 def call_model(system, messages, tools=None, max_tokens=1200):
     """Send a conversation to the model and get one reply back.
 
-    system:   a string of instructions ("You are a calendar assistant...")
-    messages: the conversation so far, e.g.
+    system:   the instructions, as one string
+    messages: the conversation so far, in the API's shape -
                   [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
-    tools:    a list of tool descriptions (you build these in Part 4)
+    tools:    the tool schemas the model may choose from, or None
+
+    A thin wrapper over `stream_model`, for callers with nothing to do with
+    the text until it is complete.
+    """
+    for kind, payload in stream_model(system, messages, tools, max_tokens):
+        if kind == "reply":
+            return payload
+
+
+def stream_model(system, messages, tools=None, max_tokens=1200):
+    """The same call, as a generator, so an answer can be shown as it arrives.
+
+    Yields ("text", chunk) each time the model writes a little more, then
+    exactly one ("reply", {...}) carrying the same dictionary `call_model`
+    returns. Callers that do not care about the chunks ignore them - which is
+    what `call_model` above does, so there is one code path rather than two.
+
+    A question is several calls, and text can come from any of them: the model
+    often says what it is about to do before reaching for a tool. All of it is
+    real output and all of it is streamed.
     """
     if not have_api_key():
-        return _fake_model(system, messages, tools)
+        # Costs nothing, but reports the same shape so no caller needs a branch
+        # for it. Arrives in one piece: there is nothing to stream from a
+        # keyword match, and pretending otherwise would only be theatre.
+        reply = _fake_model(system, messages, tools)
+        reply.setdefault("usage",
+                         {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+        if reply.get("text"):
+            yield ("text", reply["text"])
+        yield ("reply", reply)
+        return
 
     import anthropic
 
@@ -50,7 +77,12 @@ def call_model(system, messages, tools=None, max_tokens=1200):
     kwargs = {
         "model": config.MODEL,
         "max_tokens": max_tokens,
-        "system": system,
+        # Marked for caching: the instructions are several thousand tokens,
+        # they are sent on every call, and they change on none of them. A cache
+        # read is a tenth of the input price, so this is most of the bill for
+        # a question that has already been asked once.
+        "system": [{"type": "text", "text": system,
+                    "cache_control": {"type": "ephemeral"}}],
         "messages": messages,
         # Effort is nested here, not top-level. Thinking itself is left alone:
         # it stays adaptive, because a model with thinking switched off reaches
@@ -59,11 +91,22 @@ def call_model(system, messages, tools=None, max_tokens=1200):
         "output_config": {"effort": config.MODEL_EFFORT},
     }
     if tools:
+        # The marker goes on the last tool only. It caches everything up to
+        # that point, so one marker covers the whole block - and the tools are
+        # as fixed as the system prompt is.
+        tools = [dict(tool) for tool in tools]
+        tools[-1]["cache_control"] = {"type": "ephemeral"}
         kwargs["tools"] = tools
 
-    response = client.messages.create(**kwargs)
+    with client.messages.stream(**kwargs) as stream:
+        for chunk in stream.text_stream:
+            yield ("text", chunk)
+        # Only complete once the stream is drained. This carries the tool calls
+        # and the token counts, neither of which exists until the end.
+        response = stream.get_final_message()
+
     content = [block.model_dump() for block in response.content]
-    return {
+    yield ("reply", {
         "text": "\n".join(b.get("text", "") for b in content if b["type"] == "text").strip(),
         "tool_calls": [
             {"id": b["id"], "name": b["name"], "input": b.get("input") or {}}
@@ -71,12 +114,29 @@ def call_model(system, messages, tools=None, max_tokens=1200):
             if b["type"] == "tool_use"
         ],
         "content": content,
+        "usage": _usage(response.usage),
+    })
+
+
+def _usage(reported):
+    """The four numbers that are billed differently, as plain integers.
+
+    Read with getattr because the cache fields are absent on responses from
+    models or accounts where caching did not apply, and a missing field should
+    read as zero rather than raise.
+    """
+    return {
+        "input": getattr(reported, "input_tokens", 0) or 0,
+        "output": getattr(reported, "output_tokens", 0) or 0,
+        "cache_read": getattr(reported, "cache_read_input_tokens", 0) or 0,
+        "cache_write": getattr(reported, "cache_creation_input_tokens", 0) or 0,
     }
 
 
 # ---------------------------------------------------------------------------
-# The fake model. Keyword matching, nothing more. Good enough to prove your
-# agent loop works; useless for anything requiring actual understanding.
+# The offline stand-in. Keyword matching, nothing more: enough to exercise the
+# agent loop and the tools without an API key, and useless for anything that
+# requires actually understanding the question.
 # ---------------------------------------------------------------------------
 
 def _fake_model(system, messages, tools):

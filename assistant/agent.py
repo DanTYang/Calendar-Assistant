@@ -17,7 +17,7 @@ a loop it needs a limit.
 
 import config
 from assistant import memory, queries, search
-from assistant.llm import call_model
+from assistant.llm import call_model, stream_model
 
 # A model that keeps calling the same tool is a real failure mode, not a
 # hypothetical one, and every round costs a request.
@@ -498,13 +498,24 @@ def build_system_prompt(user_memory=None):
     return f"{prompt}\n\n{facts}" if facts else prompt
 
 
-def ask(question, occurrences, chunks, user_memory=None, on_tool_call=None,
-        source=WRITABLE_SOURCE, credentials=None):
-    """Answer one question, running whatever tools the model asks for.
+def ask_stream(question, occurrences, chunks, user_memory=None, on_tool_call=None,
+               source=WRITABLE_SOURCE, credentials=None, on_usage=None):
+    """Answer one question, yielding events as it goes.
 
-    `on_tool_call(name, args)` is invoked before each tool runs - watching the
-    model pick tools is the fastest way to tell a good description from a bad
-    one. Pass a conversation to keep context across questions.
+    This is the whole loop; `ask` below just drains it. Keeping one
+    implementation matters more than it looks - a second copy would be the one
+    that quietly stopped matching after the next change here.
+
+    Events:
+
+        {"type": "text",  "text": ...}     the model wrote a little more
+        {"type": "tool",  "tool": ..., "arguments": {...}}   about to run one
+        {"type": "answer", "text": ...}    the last thing it said, once only
+
+    Text can arrive from any step, not only the last: the model often says what
+    it is about to do before reaching for a tool. The `answer` event carries
+    only the final reply, which is what `ask` returns and what the terminal
+    prints.
     """
     user_memory = user_memory or memory.UserMemory()
     conversation = user_memory.conversation
@@ -512,24 +523,57 @@ def ask(question, occurrences, chunks, user_memory=None, on_tool_call=None,
     system = build_system_prompt(user_memory)
 
     for _ in range(MAX_STEPS):
-        reply = call_model(system, conversation.recent(),
-                           tools=tools_for(source))
+        reply = None
+        for kind, payload in stream_model(system, conversation.recent(),
+                                          tools=tools_for(source)):
+            if kind == "text":
+                yield {"type": "text", "text": payload}
+            else:
+                reply = payload
+
+        if on_usage and reply.get("usage"):
+            on_usage(reply["usage"])
+
         # The model's own reply must be stored before the tool results: the API
         # requires each tool_use block and its tool_result to sit next to each
         # other, in that order.
         conversation.add_assistant(reply["content"])
 
         if not reply.get("tool_calls"):
-            return reply["text"]
+            yield {"type": "answer", "text": reply["text"]}
+            return
 
         results = []
         for call in reply["tool_calls"]:
             if on_tool_call:
                 on_tool_call(call["name"], call["input"])
+            yield {"type": "tool", "tool": call["name"], "arguments": call["input"]}
             results.append((call["id"],
                             run_tool(call["name"], call["input"], occurrences,
-                                  chunks, source, user_memory, credentials)))
+                                     chunks, source, user_memory, credentials)))
         conversation.add_tool_results(results)
 
-    return (f"I used too many steps ({MAX_STEPS}) without reaching an answer. "
-            "Try asking something more specific.")
+    yield {"type": "answer",
+           "text": f"I used too many steps ({MAX_STEPS}) without reaching an "
+                   "answer. Try asking something more specific."}
+
+
+def ask(question, occurrences, chunks, user_memory=None, on_tool_call=None,
+        source=WRITABLE_SOURCE, credentials=None, on_usage=None):
+    """Answer one question, running whatever tools the model asks for.
+
+    `on_tool_call(name, args)` is invoked before each tool runs - watching the
+    model pick tools is the fastest way to tell a good description from a bad
+    one. Pass a conversation to keep context across questions.
+
+    `on_usage(usage)` is invoked after each call to the model, with the token
+    counts it reported. One question is several calls, and a question that
+    fails halfway has still spent everything up to that point - so this fires
+    per call rather than once at the end.
+    """
+    answer = ""
+    for event in ask_stream(question, occurrences, chunks, user_memory,
+                            on_tool_call, source, credentials, on_usage):
+        if event["type"] == "answer":
+            answer = event["text"]
+    return answer

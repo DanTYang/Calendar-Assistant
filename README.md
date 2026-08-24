@@ -489,7 +489,9 @@ answer is wrong in `queries` or `agent` rather than here.
 | `GET /birthdays?within_days=` | |
 | `GET /notes?query=` | |
 | `GET /history` | what this caller has said, and what was answered |
+| `GET /usage` | what this caller has spent today, and what is left |
 | `POST /chat` | `{"message": ...}` → the answer, plus which tools ran |
+| `POST /chat/stream` | the same answer as server-sent events, while it is written |
 
 `POST /chat` returns `tools_used` alongside the answer - the same trace the
 terminal prints. A caller has no other way to see which tool ran, and when one
@@ -503,6 +505,7 @@ Three outcomes, kept apart because only one of them is worth retrying:
 |---|---|
 | **400** | The request was wrong. An unusable date phrase comes back with the list of phrases that work. |
 | **401** | No `X-Gateway-Key`, or the wrong one. |
+| **429** | This caller, or everyone together, has spent the allowance. |
 | **502** | Google or the model failed us. The request was fine. |
 | **500** | A defect here. The message is not echoed back, since it is written for us and may name internals. |
 
@@ -551,6 +554,7 @@ both are registered as redirect URIs - Google compares them as strings.
 | `GET /token-status` | whether a refresh token is held, and when the access token expires |
 | `GET /health`, `/calendar-health` | this service, and the one behind it |
 | `GET /history` | the conversation so far, so a reload does not start blank |
+| `POST /chat/stream` | the streamed answer, proxied through byte for byte |
 | `POST /chat` | proxied downstream with the caller's id and token |
 | `POST /logout` | |
 
@@ -633,6 +637,82 @@ With `--source api` the calendar service needs no Google account of its own:
 every request brings the token it should use. Started any other way it reads
 one calendar and serves it to everyone, which is right for a single user and
 wrong for several.
+
+## Streaming
+
+An answer is several calls to the model, and the whole thing used to arrive at
+once at the end. `POST /chat/stream` sends it as it is written.
+
+`agent.ask_stream` is the loop; `agent.ask` drains it and returns the last
+thing said, so the terminal and the plain `/chat` endpoint are unchanged. One
+implementation rather than two - a second copy is the one that quietly stops
+matching after the next change.
+
+Three kinds of event go over the wire:
+
+```
+{"type": "text",   "text": "Here's your"}      the model wrote a little more
+{"type": "tool",   "tool": "find_events", ...}  about to run one
+{"type": "answer", "text": "..."}              the final reply, once
+```
+
+Text can come from any step, not only the last: the model often says what it is
+about to do before reaching for a tool, and that is real output worth showing.
+
+**The page parses the framing itself.** `EventSource` would do it, and cannot -
+it only issues GET requests, and a question has to be a POST carrying a CSRF
+header. Events can also split across network chunks, so anything after the last
+blank line is held back rather than parsed.
+
+**Markdown is applied at the end, not as it arrives.** A list is not a list
+until its last line, so text is written in as plain text and formatted once the
+stream closes.
+
+**The gateway proxies bytes rather than events.** Nothing is parsed on the way
+past. Re-encoding would add a second format to keep in step for no gain.
+
+> The first call still takes several seconds before anything appears, because
+> choosing a tool produces no text. What streaming buys is that the tool trace
+> shows up as soon as the tool is chosen, and the answer appears as it is
+> written rather than all at once.
+
+## What it costs, and the limit on it
+
+A question is two calls to the model, about 5,400 input tokens and 200 output.
+At Sonnet 5 rates that is **roughly two cents cold, and under one cent once the
+prompt cache is warm** - the system prompt and the nine tool definitions are
+marked for caching, and a cache read is a tenth of the price of fresh input.
+
+Two limits, in `assistant/spend.py`:
+
+| | Default | Stops |
+|---|---|---|
+| `DAILY_LIMIT_USD` | $0.50 per person | one runaway conversation |
+| `MONTHLY_LIMIT_USD` | $20 across everyone | ten people each doing that |
+
+The second is the one that protects the card. Per-person limits multiply by
+however many people show up.
+
+Cost is computed from the usage the API reports rather than estimated from
+message lengths, because an estimate would drift silently the next time a
+prompt changed. It is recorded per call rather than per question, so tokens
+spent by a question that then failed are still counted - they were spent
+either way. And it is checked *before* the call, since noticing afterwards
+means the limit is always passed by one question, and one question has no upper
+bound if the model keeps reaching for tools.
+
+An unrecognised model is priced as the most expensive one known. Guessing low
+would let a new model run past the limit unnoticed.
+
+## Deploying
+
+`DEPLOY.md` is the runbook: two container images, App Runner, and Postgres
+instead of H2. `docker compose up --build` runs the same arrangement locally.
+
+App Runner was chosen for one reason above the others - it gives every service
+an HTTPS domain for free, and Google will not accept a plain-HTTP OAuth
+redirect, so anything else means buying a domain and configuring a certificate
+before the thing can be signed into at all.
 
 ## Design decisions
 
@@ -727,6 +807,12 @@ tokens, and sessions survive a restart, but H2 is a development database. A
 real deployment wants Postgres, which is a connection string and a dependency
 rather than a code change.
 
+**Saved facts and spend ledgers are files.** Deployed, that means a deploy
+resets both: an App Runner container starts with an empty filesystem. Accounts,
+tokens and sessions survive, because those are in Postgres. It also means two
+instances would each keep their own ledger and the real total would be the sum,
+so the service has to stay pinned to one until both move into the database.
+
 **Both servers are development servers.** Flask says so on startup, and
 `spring-boot:run` is a development goal. Neither is meant to face the internet.
 
@@ -765,14 +851,9 @@ is regular-expression matching and the response is raw tool output.
 
 Ordered roughly by how much new machinery each one drags in.
 
-- **Keep accounts and tokens between restarts.** Spring can persist authorised
-  clients, including refresh tokens, rather than holding them in memory; the
-  user table needs a real database rather than H2. Until then the gateway is
-  usable only for as long as it stays running.
-
-- **The conversation survives a reload.** The calendar service remembers what
-  was said; the page does not, so refreshing empties the window while the
-  assistant carries on as though nothing happened.
+- **Facts and spend ledgers in the database.** They are files today, which is
+  why a deploy resets them and why the service cannot run more than one
+  instance. The accounts table is already there to put them beside.
 
 - **Teach the `.ics` parser about `RECURRENCE-ID`.** The API source folds
   changed occurrences back into their series; the file and feed sources do not,
@@ -785,12 +866,10 @@ Ordered roughly by how much new machinery each one drags in.
   billing account, and a spend cap — and it is what would let `find_free_time`
   know that a gap is not free if you are crossing town in it.
 
-- **RESTful service.** Expose the agent over HTTP (post a message, get an
-  answer), a browser front-end with message bubbles, and per-user sessions:
-  separate calendar, notes, conversation history, and facts for each account.
-  The largest change of the four — `memory.py` currently persists a single
-  global conversation, so state would have to become per-user, and accounts
-  bring authentication with them.
+- **Push notifications from Google.** Calendars are re-read on a timer; Google
+  can say when one changed instead. The thing a server can do that a terminal
+  cannot, and the reason the cache in `web.py` has a 60-second life rather than
+  a longer one.
 
 ---
 

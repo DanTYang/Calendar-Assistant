@@ -1,6 +1,7 @@
 package com.calendarassistant.gateway.calendar;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import java.io.OutputStream;
 import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
@@ -84,6 +85,42 @@ public class CalendarClient {
                 .header("X-User-Id", userId)
                 .retrieve()
                 .body(History.class));
+    }
+
+    /**
+     * Proxies a streamed answer straight through, byte for byte.
+     *
+     * <p>Nothing is parsed on the way past. The events are the calendar
+     * service's format and the browser's to interpret; re-encoding them here
+     * would add a second thing to keep in step for no gain.
+     *
+     * <p>The bytes are flushed as they arrive rather than buffered, which is
+     * the whole point - a proxy that waits for the last event delivers exactly
+     * what the non-streaming endpoint already did.
+     */
+    public void streamChat(String userId, String accessToken, String message,
+                           OutputStream out) {
+        exchange(() -> http.post()
+                .uri("/chat/stream")
+                .header("X-User-Id", userId)
+                .header("X-Google-Token", accessToken)
+                .body(new ChatRequest(message))
+                .exchange((request, response) -> {
+                    if (response.getStatusCode().isError()) {
+                        throw new CalendarServiceException(
+                                response.getStatusCode().value(),
+                                new String(response.getBody().readAllBytes()));
+                    }
+                    // The response is closed for us when this returns, which
+                    // is correct because the body is fully drained here.
+                    byte[] buffer = new byte[512];
+                    int read;
+                    while ((read = response.getBody().read(buffer)) != -1) {
+                        out.write(buffer, 0, read);
+                        out.flush();
+                    }
+                    return null;
+                }));
     }
 
     public Map<String, Object> health() {

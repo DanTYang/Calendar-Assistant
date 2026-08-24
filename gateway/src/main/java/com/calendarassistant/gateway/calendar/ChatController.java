@@ -3,6 +3,8 @@ package com.calendarassistant.gateway.calendar;
 import com.calendarassistant.gateway.user.AccountService;
 import com.calendarassistant.gateway.user.AppUser;
 import java.util.Map;
+import org.springframework.http.MediaType;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.client.OAuth2AuthorizedClient;
@@ -44,6 +46,28 @@ public class ChatController {
         String accessToken = authorized.getAccessToken().getTokenValue();
 
         return calendar.chat(user.downstreamId(), accessToken, body.message());
+    }
+
+    /**
+     * The same answer as {@code /chat}, sent as it is written.
+     *
+     * <p>Returning a {@link StreamingResponseBody} hands the response back to
+     * the container immediately and writes into it from another thread, so the
+     * request thread is not held for the length of an answer.
+     */
+    @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public StreamingResponseBody chatStream(
+            @RequestBody Message body,
+            @AuthenticationPrincipal OidcUser principal,
+            @RegisteredOAuth2AuthorizedClient("google") OAuth2AuthorizedClient authorized) {
+
+        AppUser user = accounts.require(principal);
+        String accessToken = authorized.getAccessToken().getTokenValue();
+
+        // Resolved before the lambda: the security context belongs to the
+        // request thread, and this body runs on another one.
+        String userId = user.downstreamId();
+        return out -> calendar.streamChat(userId, accessToken, body.message(), out);
     }
 
     /**

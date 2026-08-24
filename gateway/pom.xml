@@ -55,6 +55,14 @@
 		</dependency>
 
 		<dependency>
+			<!-- Used when SPRING_DATASOURCE_URL points at Postgres, which is
+			     what runs in a container. H2 stays for local runs. -->
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+
+		<dependency>
 			<groupId>com.h2database</groupId>
 			<artifactId>h2</artifactId>
 			<scope>runtime</scope>

@@ -62,6 +62,22 @@ TIMEZONE = ZoneInfo(os.environ.get("CALENDAR_TIMEZONE", "America/New_York"))
 # "wherever the phone is" - fine on a phone, useless from a laptop.
 HOME_ADDRESS = os.environ.get("HOME_ADDRESS", "")
 
+# What one person may spend in a day, and what everyone may spend in a month.
+#
+# A question costs about two cents: two calls to the model, roughly 5,400
+# input tokens and 200 output. So $0.50 is about 25 questions, comfortably
+# more than a day's real use and far short of what a loop could burn.
+#
+# The monthly ceiling is the one that protects the card. Ten people each
+# reaching their daily limit is $150, and a per-person limit cannot see that
+# coming. Set either to 0 to disable it.
+DAILY_LIMIT_USD = float(os.environ.get("DAILY_LIMIT_USD", "0.50"))
+MONTHLY_LIMIT_USD = float(os.environ.get("MONTHLY_LIMIT_USD", "20"))
+
+# Where the per-person ledgers live, beside the saved facts.
+SPEND_FOLDER = Path(os.environ.get(
+    "SPEND_FOLDER", PROJECT_ROOT / "data" / "spend"))
+
 # Shared with whatever sits in front of the HTTP service. When set, every
 # request must carry it in X-Gateway-Key or be refused - which is what stops
 # "X-User-Id: someone-else" from working for anyone who can reach the port.
